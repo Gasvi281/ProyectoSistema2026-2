@@ -1,0 +1,21 @@
+# --- Secretos / configuración local ---
+.env
+.env.local
+
+# --- Entorno virtual de Python ---
+venv/
+env/
+.venv/
+
+# --- Archivos generados por Python ---
+__pycache__/
+*.pyc
+*.pyo
+
+# --- Editor / SO ---
+.vscode/
+.DS_Store
+Thumbs.db
+
+# --- Logs propios si generan alguno ---
+*.log
