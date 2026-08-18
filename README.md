@@ -38,38 +38,174 @@ el proveedor de IA sin tocar cómo hablas con Telegram, y viceversa.
 
 ---
 
-## 1. Configuración inicial (una sola vez)
+## 1. Configuración inicial (una sola vez por persona/máquina)
 
-### Crear el bot en Telegram
-@BotFather → `/newbot` → guarda el token.
+Esta sección es para la **primera vez** que alguien del equipo prueba el
+proyecto en su computador. Cada paso incluye qué hace el comando y qué
+deberías ver si salió bien — si en algo te sale algo distinto, no sigas al
+siguiente paso, revisa primero.
 
-### Conseguir la API key de Gemini
-https://aistudio.google.com/apikey → inicia sesión → genera una key (capa
-gratuita).
+Requisito previo: tener **Python 3.10 o más reciente** instalado. Verifica
+con:
+```powershell
+python --version
+```
+Si da error de "no se reconoce", instala Python desde
+https://www.python.org/downloads/ (marca la casilla "Add Python to PATH"
+durante la instalación).
 
-### Instalar `cloudflared`
+### Paso 1 — Crear el bot en Telegram
+
+1. Abre Telegram, busca **@BotFather**.
+2. Envíale `/newbot`.
+3. Te pide un nombre visible (ej. `Proptech Agente IA`) y un username único
+   terminado en `bot` (ej. `proptech_agente_bot`).
+4. Te devuelve un **token**, algo como `8840321755:AAEIq...`. Cópialo, lo
+   vas a necesitar en el Paso 5.
+
+⚠️ **Este token es un secreto.** No lo compartas en el chat del equipo, ni
+en commits de Git, ni en capturas de pantalla. Si por accidente lo expones,
+revócalo de inmediato: @BotFather → `/mybots` → tu bot → **API Token** →
+**Revoke current token**.
+
+### Paso 2 — Conseguir la API key de Gemini
+
+1. Ve a https://aistudio.google.com/apikey con tu cuenta de Google.
+2. **Create API Key** → copia la key generada (capa gratuita).
+
+Mismo cuidado que con el token de Telegram: es un secreto, no lo compartas
+fuera del `.env`.
+
+### Paso 3 — Instalar `cloudflared`
+
+Esto es lo que expone tu servidor local a internet para que Telegram pueda
+alcanzarlo (Telegram exige una URL pública con HTTPS).
+
 ```powershell
 winget install --id Cloudflare.cloudflared --source winget
 ```
-Si falla por el error de `msstore` visto antes, usa `--source winget`
-explícitamente como arriba, o instala manualmente desde
-https://github.com/cloudflare/cloudflared/releases/latest
 
-Confirma con:
+**Por qué `--source winget` explícito:** por defecto `winget` busca en dos
+catálogos (`msstore` y `winget`), y en algunas redes (universitarias,
+corporativas) la consulta al catálogo de Microsoft Store falla por DNS
+aunque el paquete sí exista en el catálogo de `winget`. Forzar la fuente
+evita ese error.
+
+Si aun así falla, instala manualmente:
+1. Ve a https://github.com/cloudflare/cloudflared/releases/latest
+2. Descarga `cloudflared-windows-amd64.exe`
+3. Renómbralo a `cloudflared.exe`, colócalo en una carpeta fija como
+   `C:\cloudflared\` (fuera de la carpeta del proyecto — es una herramienta
+   del sistema, no parte del código)
+4. Agrégala al PATH: busca "variables de entorno" en el menú de inicio →
+   **Editar las variables de entorno del sistema** → **Variables de
+   entorno** → en tu usuario, selecciona **Path** → **Editar** → **Nuevo**
+   → pega la ruta de la carpeta → Aceptar → **cierra y vuelve a abrir
+   PowerShell** (el cambio no aplica hasta que reabres la terminal).
+
+**Verificación** (debe funcionar sin importar cuál de los dos caminos
+usaste):
 ```powershell
 cloudflared --version
 ```
+Debería mostrar algo como `cloudflared version 2024.x.x (built ...)`. Si
+sale "no se reconoce como comando", el PATH no quedó bien configurado —
+revisa el paso anterior.
 
-### Preparar el proyecto
+### Paso 4 — Permitir que PowerShell ejecute scripts locales
+
 ```powershell
-cd telegram-webhook-python
-Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned   # una sola vez
-python -m venv venv
-.\venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-copy .env.example .env
-notepad .env    # llena TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET, GEMINI_API_KEY
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
 ```
+
+**Qué hace este comando:** por defecto, muchas instalaciones de Windows
+traen PowerShell configurado para **bloquear cualquier script `.ps1`**
+(incluyendo `run.ps1`, `stop.ps1`, y el propio script que activa el
+entorno virtual de Python) — es una medida de seguridad para evitar que
+scripts maliciosos descargados de internet se ejecuten solos. Este comando
+lo cambia a un punto intermedio (`RemoteSigned`): tus propios scripts
+locales se permiten sin problema, pero un script descargado de internet
+necesitaría estar firmado digitalmente para correr.
+
+Te va a preguntar confirmación:
+```
+¿Está seguro de que desea realizar este cambio?
+[S] Sí  [N] No  [S] Suspender  [?] Ayuda (el valor predeterminado es "S"):
+```
+Escribe `S` y Enter.
+
+**Esto se configura una sola vez por usuario de Windows**, no por
+proyecto — queda guardado en tu perfil y aplica a cualquier terminal de
+PowerShell que abras después, en cualquier carpeta. Si cambias de
+computador o de cuenta de Windows, hay que repetirlo ahí.
+
+**Verificación:**
+```powershell
+Get-ExecutionPolicy -Scope CurrentUser
+```
+Debe responder `RemoteSigned`.
+
+### Paso 5 — Preparar el proyecto
+
+Parado en la carpeta del proyecto (donde están `main.py`, `requirements.txt`, etc.):
+
+```powershell
+python -m venv venv
+```
+**Qué hace:** crea una copia aislada de Python solo para este proyecto, en
+una carpeta nueva `venv/`. Evita que las librerías de este proyecto
+choquen con las de otros proyectos tuyos. No imprime nada si sale bien.
+
+```powershell
+.\venv\Scripts\Activate.ps1
+```
+**Qué hace:** activa esa copia aislada — desde este momento, en esta
+misma ventana de terminal, los comandos `python` y `pip` usan la versión
+del proyecto en vez de la global de tu sistema.
+
+**Verificación:** tu línea de comandos debe cambiar y mostrar `(venv)` al
+inicio:
+```
+(venv) PS C:\...\telegram-webhook-python>
+```
+Si no aparece, probablemente el Paso 4 no se aplicó bien — revisa con
+`Get-ExecutionPolicy -Scope CurrentUser` otra vez.
+
+⚠️ Esta activación **dura solo mientras esa ventana esté abierta**. Si
+cierras la terminal, tienes que repetir este comando (no hace falta volver
+a crear el `venv`, solo activarlo).
+
+```powershell
+pip install -r requirements.txt
+```
+**Qué hace:** instala las 4 librerías que el proyecto necesita (FastAPI,
+uvicorn, httpx, python-dotenv), leyendo la lista desde `requirements.txt`.
+Vas a ver varias líneas de `Collecting...` / `Installing...` — es normal,
+termina con `Successfully installed ...`.
+
+```powershell
+copy .env.example .env
+```
+**Qué hace:** crea tu archivo de configuración real a partir de la
+plantilla. `.env` es el que de verdad lee el proyecto (`config.py`); nunca
+se sube a Git (está en `.gitignore`) porque va a tener tus secretos.
+
+```powershell
+notepad .env
+```
+Abre el archivo para editarlo. Reemplaza los 3 valores de ejemplo por los
+reales que conseguiste en los Pasos 1 y 2:
+```
+TELEGRAM_BOT_TOKEN=<el token que te dio BotFather>
+TELEGRAM_WEBHOOK_SECRET=<inventa una cadena larga y random>
+GEMINI_API_KEY=<la key de Google AI Studio>
+```
+Para el `TELEGRAM_WEBHOOK_SECRET`, cualquier cadena larga sirve — puedes
+generar una con:
+```powershell
+python -c "import secrets; print(secrets.token_hex(24))"
+```
+Guarda el archivo (Ctrl+S) y cierra Notepad.
 
 ---
 
