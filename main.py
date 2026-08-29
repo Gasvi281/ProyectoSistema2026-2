@@ -11,11 +11,18 @@ Conecta los otros dos módulos:
 config.py se importa indirectamente a través de esos dos módulos.
 """
 
+import os
+import sys
+
+# Hace importable el paquete agent desde apps/agent/src sin tocar run.ps1
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "apps", "agent", "src"))
+
 from fastapi import FastAPI, Request, Header, HTTPException, BackgroundTasks
 
 from config import TELEGRAM_WEBHOOK_SECRET
-from ai_service import ask_ai
+from ai_service import ask_ai  # conservado intacto; ya no se usa en el flujo normal
 from telegram_service import send_message
+from agent.core_langchain import handle_turn
 import chat_history
 
 app = FastAPI()
@@ -73,7 +80,16 @@ async def handle_message(chat_id: int, user_text: str) -> None:
 
     else:
         history = chat_history.get_history(chat_id)
-        reply = await ask_ai(user_text, history)
+        try:
+            agent_reply = await handle_turn(
+                client_id=str(chat_id),
+                channel="telegram",
+                message=user_text,
+            )
+            reply = agent_reply.reply_text
+        except Exception as e:
+            print(f"[main] Error llamando al agente: {e}")
+            reply = "Estamos teniendo un problema, intenta de nuevo en un momento."
 
         # Guardamos ambos turnos para que el próximo mensaje tenga contexto
         chat_history.add_message(chat_id, "user", user_text)

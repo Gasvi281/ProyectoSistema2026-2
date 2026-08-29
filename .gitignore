@@ -19,3 +19,13 @@ Thumbs.db
 
 # --- Logs propios si generan alguno ---
 *.log
+
+.agents/
+.claude/
+docs/
+CLAUDE.md
+LANGCHAIN_IMPLEMENTATION_SUMMARY.txt
+skills-lock.json
+apps/agent/INTEGRATION.md
+apps/agent/LANGCHAIN_IMPLEMENTATION.md
+apps/agent/README.md
