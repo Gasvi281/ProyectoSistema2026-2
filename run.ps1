@@ -78,27 +78,35 @@ if (-not $tunnelUrl) {
 Write-Host "URL publica detectada: $tunnelUrl" -ForegroundColor Green
 
 # 6. Esperar a que el tunel realmente resuelva y responda (DNS tarda un poco
-#    en propagarse justo despues de que Cloudflare la muestra en el log) ----
-Write-Host "Confirmando que el tunel ya esta accesible..." -ForegroundColor Cyan
+#    en propagarse justo despues de que Cloudflare la muestra en el log;
+#    en algunas redes esto puede tardar mas de un minuto) ------------------
+Write-Host "Confirmando que el tunel ya esta accesible (puede tardar hasta 2 minutos)..." -ForegroundColor Cyan
 $tunnelReady = $false
 $readyAttempts = 0
+$maxReadyAttempts = 40  # 40 x 3s = 120s
 
-while (-not $tunnelReady -and $readyAttempts -lt 15) {
+while (-not $tunnelReady -and $readyAttempts -lt $maxReadyAttempts) {
     try {
         $null = Invoke-WebRequest -Uri $tunnelUrl -TimeoutSec 5 -ErrorAction Stop
         $tunnelReady = $true
     } catch {
         $readyAttempts++
-        Start-Sleep -Seconds 2
+        if ($readyAttempts % 10 -eq 0) {
+            Write-Host "  Todavia esperando... ($readyAttempts/$maxReadyAttempts intentos)" -ForegroundColor DarkYellow
+        }
+        Start-Sleep -Seconds 3
     }
 }
 
-if (-not $tunnelReady) {
-    Write-Error "El tunel no respondio despues de varios intentos. Verifica manualmente abriendo $tunnelUrl en el navegador."
-    exit 1
+if ($tunnelReady) {
+    Write-Host "Tunel accesible, registrando webhook..." -ForegroundColor Green
+} else {
+    # No fallamos duro aqui: en algunas redes el tunel tarda mas de lo que
+    # este chequeo espero, pero puede que ya este funcionando igual (Telegram
+    # se conecta desde otra ubicacion). Seguimos e intentamos el registro,
+    # que tiene sus propios reintentos como segunda oportunidad.
+    Write-Host "El tunel no respondio a tiempo en este chequeo local, pero puede que ya funcione. Intentando registrar el webhook de todas formas..." -ForegroundColor Yellow
 }
-
-Write-Host "Tunel accesible, registrando webhook..." -ForegroundColor Green
 
 # 7. Registrar el webhook en Telegram automaticamente ----------------------
 $webhookUrl = "$tunnelUrl/webhook/telegram"
@@ -106,9 +114,10 @@ $body = @{ url = $webhookUrl; secret_token = $secret } | ConvertTo-Json
 
 Write-Host "Registrando el webhook en Telegram..." -ForegroundColor Cyan
 
-# Reintenta unas veces por si Telegram todavia no puede resolver la URL
-# justo en el primer intento (mismo motivo que arriba: propagacion de DNS).
-$maxRetries = 5
+# Reintenta bastantes veces por si Telegram todavia no puede resolver la URL
+# justo en los primeros intentos (misma razon: propagacion de DNS del tunel,
+# que en algunas redes tarda varios minutos en vez de segundos).
+$maxRetries = 24  # 24 x 5s = 120s adicionales de margen
 $registered = $false
 
 for ($i = 1; $i -le $maxRetries -and -not $registered; $i++) {
@@ -119,12 +128,16 @@ for ($i = 1; $i -le $maxRetries -and -not $registered; $i++) {
         if ($response.ok) {
             $registered = $true
         } else {
-            Write-Host "Intento $i fallo: $($response.description)" -ForegroundColor Yellow
-            Start-Sleep -Seconds 3
+            if ($i % 5 -eq 0) {
+                Write-Host "  Intento $i/$maxRetries fallo: $($response.description)" -ForegroundColor Yellow
+            }
+            Start-Sleep -Seconds 5
         }
     } catch {
-        Write-Host "Intento $i fallo (posible propagacion de DNS pendiente), reintentando..." -ForegroundColor Yellow
-        Start-Sleep -Seconds 3
+        if ($i % 5 -eq 0) {
+            Write-Host "  Intento $i/$maxRetries fallo (posible propagacion de DNS pendiente), reintentando..." -ForegroundColor Yellow
+        }
+        Start-Sleep -Seconds 5
     }
 }
 
