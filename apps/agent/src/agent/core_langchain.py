@@ -58,8 +58,15 @@ class ConversationalAgent:
                 executor = self._get_executor()
                 # thread_id mantiene el historial por cliente dentro del MemorySaver
                 config = {"configurable": {"thread_id": client_id}}
+                # El modelo no tiene forma de conocer el client_id real si no
+                # se lo decimos explícitamente — sin esto, herramientas como
+                # schedule_meeting/save_liked_property/request_visit recibirían
+                # un client_id inventado en vez del chat_id real de Telegram.
+                contextual_message = (
+                    f"[client_id de esta conversación: {client_id}] {message}"
+                )
                 result = await executor.ainvoke(
-                    {"messages": [HumanMessage(content=message)]},
+                    {"messages": [HumanMessage(content=contextual_message)]},
                     config=config,
                 )
                 reply_text = self._extract_text(result["messages"][-1].content)

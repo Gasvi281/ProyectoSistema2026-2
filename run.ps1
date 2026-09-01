@@ -32,18 +32,17 @@ if (-not $token -or -not $secret) {
     exit 1
 }
 
-# 2. Verificar / crear entorno virtual -------------------------------------
-if (-not (Test-Path "venv\Scripts\Activate.ps1")) {
-    Write-Host "No hay entorno virtual, creandolo por primera vez..." -ForegroundColor Yellow
-    python -m venv venv
-    & ".\venv\Scripts\Activate.ps1"
-    pip install -r requirements.txt
-}
+# 2. Sincronizar el entorno con uv -----------------------------------------
+# "uv sync" instala/actualiza TODO el workspace (webhook + agente) en un
+# solo entorno virtual compartido (.venv en la raiz), leyendo pyproject.toml
+# y uv.lock. Es idempotente: si ya esta al dia, no hace nada.
+Write-Host "Sincronizando entorno con uv..." -ForegroundColor Cyan
+uv sync
 
 # 3. Levantar uvicorn en una ventana nueva ---------------------------------
 Write-Host "Levantando servidor FastAPI en el puerto 3000..." -ForegroundColor Cyan
 Start-Process powershell -ArgumentList "-NoExit", "-Command", `
-    "cd '$PWD'; .\venv\Scripts\Activate.ps1; uvicorn main:app --reload --port 3000"
+    "cd '$PWD'; uv run uvicorn main:app --reload --port 3000"
 
 Start-Sleep -Seconds 3
 

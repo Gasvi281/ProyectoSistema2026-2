@@ -1,0 +1,31 @@
+[project]
+name = "proptech-webhook"
+version = "0.1.0"
+description = "Webhook de Telegram - Proptech Marketplace"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.6",
+    "httpx>=0.27.2",
+    "python-dotenv>=1.0.1",
+    "proptech-agent",
+]
+
+# Le dice a uv que "proptech-agent" no viene de PyPI, sino que es el
+# paquete que vive en apps/agent dentro de este mismo repo (workspace).
+[tool.uv.sources]
+proptech-agent = { workspace = true }
+
+# Todo lo que esté en apps/* se trata como parte del mismo workspace:
+# un solo entorno virtual, un solo uv.lock, para el webhook y el agente.
+[tool.uv.workspace]
+members = ["apps/*"]
+
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# Los archivos del webhook están sueltos en la raíz (no en una carpeta
+# "src"), así que se declaran como módulos individuales.
+[tool.setuptools]
+py-modules = ["main", "ai_service", "config", "chat_history", "telegram_service"]

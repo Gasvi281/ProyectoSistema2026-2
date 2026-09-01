@@ -30,6 +30,11 @@ class LikePropertyInput(BaseModel):
     client_id: str = Field(..., description="Client ID")
     property_id: str = Field(..., description="Property ID")
 
+class RequestVisitInput(BaseModel):
+    client_id: str = Field(..., description="Client ID — usa el que aparece al inicio del mensaje del sistema, nunca lo inventes")
+    property_description: str = Field(..., description="Descripción del inmueble en las propias palabras del cliente (ubicación, tipo, lo que haya mencionado)")
+    preferred_datetime: str = Field(..., description="Fecha/hora preferida tal como la expresó el cliente (puede ser texto libre, ej. 'mañana en la tarde')")
+
 @tool(args_schema=SearchInput)
 def search_properties(location=None, min_price=None, max_price=None, min_bedrooms=None, max_bedrooms=None, property_type=None):
     """Search property catalog. Grounding: returns no-matches message if empty, never invents."""
@@ -102,6 +107,8 @@ def check_availability(property_id, start_date, end_date):
 async def schedule_meeting(property_id, client_id, slot_id):
     """Schedule visit. Creates pending_confirmation appointment."""
     from agent.fakes import FakeAvailability, FakeBooking
+    from agent.notifications import get_notifications_provider
+
     availability = FakeAvailability()
     booking = FakeBooking()
 
@@ -111,6 +118,16 @@ async def schedule_meeting(property_id, client_id, slot_id):
 
     appt = await booking.create_appointment(property_id, client_id, slot_id, "Via assistant")
     time_str = slot.start_time.strftime("%a %b %d %H:%M")
+
+    # Avisamos al agente humano por correo (o al fake, según NOTIFICATIONS_MODE).
+    # Si el envío falla, no tumbamos la reserva — el cliente ya tiene su cita
+    # guardada, solo se pierde el aviso automático y toca darse cuenta manualmente.
+    try:
+        notifications = get_notifications_provider()
+        await notifications.notify_agent_appointment(appt.id, property_id, client_id)
+    except Exception as e:
+        print(f"[schedule_meeting] No se pudo notificar al agente: {e}")
+
     return f"Appointment scheduled for {time_str}. ID: {appt.id}. Status: pending_confirmation. Agent will confirm soon."
 
 @tool(args_schema=LikePropertyInput)
@@ -121,6 +138,35 @@ async def save_liked_property(client_id, property_id):
     await store.record_liked_property(client_id, property_id)
     return f"Saved {property_id} to your preferences."
 
+@tool(args_schema=RequestVisitInput)
+async def request_visit(client_id, property_description, preferred_datetime):
+    """Request a property visit WITHOUT checking the real catalog/availability
+    (use this only while search_properties/check_availability have no real
+    data to offer — i.e. the database isn't connected yet). Sends the
+    request directly to the human agent by email, based only on what the
+    client described in the conversation. Do not invent a client_id — use
+    the one given in the system context for this conversation."""
+    import uuid
+    from agent.notifications import send_manual_visit_request
+
+    appointment_id = f"manual-{uuid.uuid4().hex[:8]}"
+
+    try:
+        ok = await send_manual_visit_request(
+            appointment_id, client_id, property_description, preferred_datetime
+        )
+    except Exception as e:
+        print(f"[request_visit] No se pudo notificar al agente: {e}")
+        return "Tuve un problema enviando tu solicitud, intenta de nuevo en un momento."
+
+    if ok:
+        return (
+            f"Listo, envié tu solicitud de visita al agente inmobiliario. "
+            f"Te contactará pronto para confirmar disponibilidad. "
+            f"ID de referencia: {appointment_id}"
+        )
+    return "No pude enviar la solicitud en este momento, pero tu interés quedó registrado. Intenta de nuevo más tarde."
+
 def get_tools():
     """Get all tools."""
-    return [search_properties, answer_property_question, check_availability, schedule_meeting, save_liked_property]
+    return [search_properties, answer_property_question, check_availability, schedule_meeting, save_liked_property, request_visit]
