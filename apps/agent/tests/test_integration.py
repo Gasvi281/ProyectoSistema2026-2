@@ -17,8 +17,8 @@ async def test_handle_turn_history_per_client():
     await agent.handle_turn("client_A", "console", "Message A")
     await agent.handle_turn("client_B", "console", "Message B")
     
-    history_a = agent.conversation_history.get("client_A", [])
-    history_b = agent.conversation_history.get("client_B", [])
+    history_a = await agent.conversation_store.get_client_history("client_A")
+    history_b = await agent.conversation_store.get_client_history("client_B")
     assert history_a != history_b
 
 @pytest.mark.asyncio
