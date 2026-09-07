@@ -53,3 +53,15 @@ class AgentSlotsPort(ABC):
     async def list_agent_slots(self, agent_id: str, date_from: str, date_to: str) -> dict:
         """Retorna {"agent_id", "slot_minutes", "slots": [{"start", "end"}, ...]}."""
         pass
+
+class AppointmentBookingPort(ABC):
+    """Puerto para crear citas en el backend real."""
+    @abstractmethod
+    async def book(self, lead_id: str, scheduled_at: str, duration_min: int) -> dict:
+        """
+        Crea una cita. Retorna el objeto 201 del backend:
+        {"id", "lead_id", "agent_id", "scheduled_at", "duration_min", "status",
+         "created_at", "updated_at"}
+        Lanza httpx.HTTPStatusError en error HTTP (incluye 409 y 422).
+        """
+        pass

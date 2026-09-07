@@ -40,6 +40,11 @@ class AgentAvailabilityInput(BaseModel):
     date_from: str = Field(..., description="Inicio del rango a consultar — ISO 8601 con zona horaria, ej. '2026-09-10T00:00:00+00:00'")
     date_to: str = Field(..., description="Fin del rango a consultar — ISO 8601 con zona horaria, ej. '2026-09-17T23:59:59+00:00'")
 
+class BookAppointmentInput(BaseModel):
+    lead_id: str = Field(..., description="ID del lead/cliente — usa el que aparece al inicio del mensaje del sistema, nunca lo inventes")
+    scheduled_at: str = Field(..., description="Fecha/hora del slot elegido — ISO 8601 con zona horaria, ej. '2026-09-10T09:00:00+00:00'. Debe ser un slot real obtenido de check_agent_availability, nunca inventado")
+    duration_min: int = Field(60, description="Duración de la visita en minutos (default 60)")
+
 @tool(args_schema=SearchInput)
 def search_properties(location=None, min_price=None, max_price=None, min_bedrooms=None, max_bedrooms=None, property_type=None):
     """Search property catalog. Grounding: returns no-matches message if empty, never invents."""
@@ -185,6 +190,32 @@ async def check_agent_availability(agent_id, date_from, date_to):
         return {"agent_id": agent_id, "slots": [], "error": str(e)}
 
 
+@tool(args_schema=BookAppointmentInput)
+async def book_appointment(lead_id, scheduled_at, duration_min=60):
+    """Agenda una visita a una propiedad usando un slot real obtenido de check_agent_availability.
+    Nunca inventes scheduled_at ni lead_id — usa solo valores confirmados en la conversación.
+    En caso de conflicto (409) sugiere al usuario consultar de nuevo check_agent_availability
+    para elegir otro horario disponible."""
+    import httpx
+    from agent.booking import get_appointment_booking_provider
+
+    provider = get_appointment_booking_provider()
+    try:
+        result = await provider.book(lead_id, scheduled_at, duration_min)
+        return {**result, "error": None, "error_code": None}
+    except httpx.HTTPStatusError as e:
+        code = e.response.status_code
+        if code == 409:
+            msg = "Ya existe una cita en ese horario. Consulta check_agent_availability para elegir otro slot disponible."
+        elif code == 422:
+            msg = "La fecha indicada está en el pasado. Por favor elige un horario futuro."
+        else:
+            msg = f"Error del servidor ({code}) al agendar la cita."
+        return {"lead_id": lead_id, "scheduled_at": scheduled_at, "error": msg, "error_code": code}
+    except Exception as e:
+        return {"lead_id": lead_id, "scheduled_at": scheduled_at, "error": str(e), "error_code": None}
+
+
 def get_tools():
     """Get all tools."""
-    return [search_properties, answer_property_question, check_availability, schedule_meeting, save_liked_property, request_visit, check_agent_availability]
+    return [search_properties, answer_property_question, check_availability, schedule_meeting, save_liked_property, request_visit, check_agent_availability, book_appointment]

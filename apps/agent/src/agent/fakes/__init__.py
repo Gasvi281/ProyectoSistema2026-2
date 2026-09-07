@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 import uuid
 from agent.types import Property, AvailableSlot, Appointment, SearchFilters, ClientInteraction
-from agent.ports import CatalogPort, AvailabilityPort, BookingPort, NotificationsPort, ConversationStorePort, AgentSlotsPort
+from agent.ports import CatalogPort, AvailabilityPort, BookingPort, NotificationsPort, ConversationStorePort, AgentSlotsPort, AppointmentBookingPort
 
 class FakeCatalog(CatalogPort):
     def __init__(self):
@@ -97,6 +97,23 @@ class FakeAgentSlots(AgentSlotsPort):
             "agent_id": agent_id,
             "slot_minutes": self.SLOT_MINUTES,
             "slots": slots,
+        }
+
+
+class FakeAppointmentBooking(AppointmentBookingPort):
+    """Crea una cita en memoria (sin HTTP) para dev y tests."""
+
+    async def book(self, lead_id: str, scheduled_at: str, duration_min: int) -> dict:
+        now = datetime.now(timezone.utc).isoformat()
+        return {
+            "id": f"appt-{uuid.uuid4().hex[:8]}",
+            "lead_id": lead_id,
+            "agent_id": "agent-fake",
+            "scheduled_at": scheduled_at,
+            "duration_min": duration_min,
+            "status": "PENDING_CONFIRMATION",
+            "created_at": now,
+            "updated_at": now,
         }
 
 
