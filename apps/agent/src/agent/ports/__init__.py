@@ -46,3 +46,10 @@ class ConversationStorePort(ABC):
     @abstractmethod
     async def record_liked_property(self, client_id: str, property_id: str) -> None:
         pass
+
+class AgentSlotsPort(ABC):
+    """Puerto para consultar disponibilidad de slots de un agente inmobiliario."""
+    @abstractmethod
+    async def list_agent_slots(self, agent_id: str, date_from: str, date_to: str) -> dict:
+        """Retorna {"agent_id", "slot_minutes", "slots": [{"start", "end"}, ...]}."""
+        pass

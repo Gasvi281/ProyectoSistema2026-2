@@ -35,6 +35,11 @@ class RequestVisitInput(BaseModel):
     property_description: str = Field(..., description="Descripción del inmueble en las propias palabras del cliente (ubicación, tipo, lo que haya mencionado)")
     preferred_datetime: str = Field(..., description="Fecha/hora preferida tal como la expresó el cliente (puede ser texto libre, ej. 'mañana en la tarde')")
 
+class AgentAvailabilityInput(BaseModel):
+    agent_id: str = Field(..., description="ID del agente inmobiliario cuya disponibilidad se quiere consultar")
+    date_from: str = Field(..., description="Inicio del rango a consultar — ISO 8601 con zona horaria, ej. '2026-09-10T00:00:00+00:00'")
+    date_to: str = Field(..., description="Fin del rango a consultar — ISO 8601 con zona horaria, ej. '2026-09-17T23:59:59+00:00'")
+
 @tool(args_schema=SearchInput)
 def search_properties(location=None, min_price=None, max_price=None, min_bedrooms=None, max_bedrooms=None, property_type=None):
     """Search property catalog. Grounding: returns no-matches message if empty, never invents."""
@@ -167,6 +172,19 @@ async def request_visit(client_id, property_description, preferred_datetime):
         )
     return "No pude enviar la solicitud en este momento, pero tu interés quedó registrado. Intenta de nuevo más tarde."
 
+@tool(args_schema=AgentAvailabilityInput)
+async def check_agent_availability(agent_id, date_from, date_to):
+    """Consulta los slots disponibles de un agente inmobiliario entre dos fechas.
+    Solo retorna slots reales; si no hay ninguno retorna lista vacía — nunca inventa horarios."""
+    from agent.agent_slots import get_agent_slots_provider
+    provider = get_agent_slots_provider()
+    try:
+        result = await provider.list_agent_slots(agent_id, date_from, date_to)
+        return {**result, "error": None}
+    except Exception as e:
+        return {"agent_id": agent_id, "slots": [], "error": str(e)}
+
+
 def get_tools():
     """Get all tools."""
-    return [search_properties, answer_property_question, check_availability, schedule_meeting, save_liked_property, request_visit]
+    return [search_properties, answer_property_question, check_availability, schedule_meeting, save_liked_property, request_visit, check_agent_availability]

@@ -1,9 +1,9 @@
 """In-memory implementations of all ports."""
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 import uuid
 from agent.types import Property, AvailableSlot, Appointment, SearchFilters, ClientInteraction
-from agent.ports import CatalogPort, AvailabilityPort, BookingPort, NotificationsPort, ConversationStorePort
+from agent.ports import CatalogPort, AvailabilityPort, BookingPort, NotificationsPort, ConversationStorePort, AgentSlotsPort
 
 class FakeCatalog(CatalogPort):
     def __init__(self):
@@ -80,6 +80,25 @@ class FakeNotifications(NotificationsPort):
     async def notify_agent_appointment(self, appointment_id: str, property_id: str, client_id: str) -> bool:
         self.sent.append({"appointment_id": appointment_id, "property_id": property_id, "client_id": client_id})
         return True
+
+class FakeAgentSlots(AgentSlotsPort):
+    """Disponibilidad predefinida para un agente ficticio (sin HTTP)."""
+
+    SLOT_MINUTES = 30
+
+    async def list_agent_slots(self, agent_id: str, date_from: str, date_to: str) -> dict:
+        base = datetime(2026, 9, 10, 9, 0, tzinfo=timezone.utc)
+        slots = []
+        for offset in range(4):
+            start = base + timedelta(hours=offset)
+            end = start + timedelta(minutes=self.SLOT_MINUTES)
+            slots.append({"start": start.isoformat(), "end": end.isoformat()})
+        return {
+            "agent_id": agent_id,
+            "slot_minutes": self.SLOT_MINUTES,
+            "slots": slots,
+        }
+
 
 class FakeConversationStore(ConversationStorePort):
     def __init__(self):
