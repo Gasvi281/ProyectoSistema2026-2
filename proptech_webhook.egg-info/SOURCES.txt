@@ -1,0 +1,12 @@
+README.md
+ai_service.py
+chat_history.py
+config.py
+main.py
+pyproject.toml
+telegram_service.py
+proptech_webhook.egg-info/PKG-INFO
+proptech_webhook.egg-info/SOURCES.txt
+proptech_webhook.egg-info/dependency_links.txt
+proptech_webhook.egg-info/requires.txt
+proptech_webhook.egg-info/top_level.txt
