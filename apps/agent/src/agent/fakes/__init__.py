@@ -7,6 +7,12 @@ from agent.ports import CatalogPort, AvailabilityPort, BookingPort, Notification
 
 class FakeCatalog(CatalogPort):
     def __init__(self):
+        # DEUDA TÉCNICA (T-xx, vinculada a HU-21/HU-22): estos son IDs sintéticos
+        # que violarían la FK real del backend si llegaran a un POST http.
+        # Riesgo solo si se mezcla modo fake y modo http sin aislar datos de
+        # prueba — hoy no ocurre porque agent_slots.py/booking.py (modo http)
+        # no consumen FakeCatalog. No resolver sin antes decidir si el fix es
+        # usar UUIDs reales de seed o aislar los modos más estrictamente.
         self.properties = {
             "prop_001": Property("prop_001", "Apartamento Laureles", "Laureles", 250_000_000, 65, 2, 1, "apartment", ["balcony", "parking"], "Modern 2-bedroom"),
             "prop_002": Property("prop_002", "Casa Sabaneta", "Sabaneta", 350_000_000, 120, 3, 2, "house", ["garden", "garage"], "Family house"),
