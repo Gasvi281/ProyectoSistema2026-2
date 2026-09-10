@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 import uuid
 from agent.types import Property, AvailableSlot, Appointment, SearchFilters, ClientInteraction
-from agent.ports import CatalogPort, AvailabilityPort, BookingPort, NotificationsPort, ConversationStorePort, AgentSlotsPort, AppointmentBookingPort
+from agent.ports import CatalogPort, AvailabilityPort, BookingPort, NotificationsPort, ConversationStorePort, AgentSlotsPort, AppointmentBookingPort, ClientResolverPort
 
 class FakeCatalog(CatalogPort):
     def __init__(self):
@@ -121,6 +121,23 @@ class FakeAppointmentBooking(AppointmentBookingPort):
             "created_at": now,
             "updated_at": now,
         }
+
+
+# ID de cliente seed verificado contra el backend desplegado (CLAUDE.md).
+# DEUDA TÉCNICA: inválido si se reseedea la DB — mismo riesgo que prop_001-004.
+SEED_CLIENT_ID = "6cdfee4d-a409-44a4-8a64-cf59ac9ec4ad"
+
+class FakeClientResolver(ClientResolverPort):
+    """Mapea cualquier chat_id al client_id de seed, de forma estable en memoria.
+
+    El dict garantiza que el mismo chat_id devuelve siempre el mismo id durante
+    la sesión — deja el punto de extensión listo para ids por-cliente reales.
+    """
+    def __init__(self):
+        self._map: dict[str, str] = {}
+
+    async def resolve_client(self, chat_id: str, phone: str | None = None, full_name: str | None = None) -> str:
+        return self._map.setdefault(chat_id, SEED_CLIENT_ID)
 
 
 class FakeConversationStore(ConversationStorePort):

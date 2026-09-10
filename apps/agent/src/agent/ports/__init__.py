@@ -65,3 +65,13 @@ class AppointmentBookingPort(ABC):
         Lanza httpx.HTTPStatusError en error HTTP (incluye 409 y 422).
         """
         pass
+
+class ClientResolverPort(ABC):
+    """Resuelve la identidad de canal (chat_id) a un client_id de backend."""
+    @abstractmethod
+    async def resolve_client(
+        self, chat_id: str, phone: str | None = None, full_name: str | None = None
+    ) -> str:
+        """Retorna el client_id (UUID de backend) para este chat_id.
+        phone/full_name son opcionales: aún no se decide si el bot los captura."""
+        pass
