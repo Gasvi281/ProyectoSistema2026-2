@@ -17,7 +17,7 @@ async def main():
     print("Escribe 'salir' para terminar.\n")
 
     agent = get_agent()
-    client_id = "console_user_001"
+    chat_id = "console_user_001"
     channel = "console"
 
     while True:
@@ -34,7 +34,7 @@ async def main():
             break
 
         try:
-            reply = await agent.handle_turn(client_id, channel, user_input)
+            reply = await agent.handle_turn(chat_id, channel, user_input)
             print(f"\nAsistente: {reply.reply_text}\n")
         except Exception as e:
             print(f"\nError: {str(e)}\n")

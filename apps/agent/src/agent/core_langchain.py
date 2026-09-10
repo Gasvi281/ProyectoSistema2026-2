@@ -10,6 +10,7 @@ from agent.types import AgentReply, ClientInteraction
 from agent.llm import get_langchain_llm
 from agent.tools_langchain import get_tools
 from agent.fakes import FakeConversationStore
+from agent.client_resolver import get_client_resolver_provider
 
 
 class ConversationalAgent:
@@ -21,6 +22,9 @@ class ConversationalAgent:
         self.conversation_store = FakeConversationStore()
         self.system_prompt = self._load_system_prompt()
         self._executor = None
+        # Una sola instancia por singleton de agente: la memoización interna del
+        # resolver persiste entre turnos del mismo proceso.
+        self.client_resolver = get_client_resolver_provider()
 
     def _load_system_prompt(self) -> str:
         prompt_path = os.path.join(os.path.dirname(__file__), "..", "..", "prompts", "system.md")
@@ -50,18 +54,19 @@ class ConversationalAgent:
             return " ".join(b.get("text", "") for b in content if isinstance(b, dict))
         return str(content)
 
-    async def handle_turn(self, client_id: str, channel: str, message: str) -> AgentReply:
+    async def handle_turn(self, chat_id: str, channel: str, message: str) -> AgentReply:
         mode = os.getenv("AGENT_LLM_MODE", "fake").lower()
 
         try:
             if mode == "gemini":
                 executor = self._get_executor()
-                # thread_id mantiene el historial por cliente dentro del MemorySaver
-                config = {"configurable": {"thread_id": client_id}}
-                # El modelo no tiene forma de conocer el client_id real si no
-                # se lo decimos explícitamente — sin esto, herramientas como
-                # schedule_meeting/save_liked_property/request_visit recibirían
-                # un client_id inventado en vez del chat_id real de Telegram.
+                # thread_id por usuario de canal (chat_id crudo): mantiene el
+                # historial separado por persona en el MemorySaver.
+                config = {"configurable": {"thread_id": chat_id}}
+                # Resolver el client_id real de backend (distinto del chat_id)
+                # para que tools como create_or_get_lead reciban el id correcto.
+                # FakeClientResolver es determinista y nunca lanza.
+                client_id = await self.client_resolver.resolve_client(chat_id)
                 contextual_message = (
                     f"[client_id de esta conversación: {client_id}] {message}"
                 )
@@ -71,16 +76,17 @@ class ConversationalAgent:
                 )
                 reply_text = self._extract_text(result["messages"][-1].content)
             else:
-                # Modo fake: sin LangGraph (FakeLLM no soporta bind_tools)
+                # Modo fake: sin LangGraph (FakeLLM no soporta bind_tools).
+                # No se resuelve client_id — no hay tools que lo consuman aquí.
                 reply_text = self.llm._call(message)
         except Exception as e:
             reply_text = f"Error: {str(e)}"
 
         interaction = ClientInteraction(
             id=str(uuid.uuid4()),
-            client_id=client_id,
+            client_id=chat_id,
             channel=channel,
-            channel_user_id=client_id,
+            channel_user_id=chat_id,
             message=message,
             reply=reply_text,
             timestamp=datetime.now(),
@@ -94,7 +100,7 @@ class ConversationalAgent:
         return AgentReply(
             reply_text=reply_text,
             metadata={
-                "client_id": client_id,
+                "chat_id": chat_id,
                 "channel": channel,
                 "timestamp": interaction.timestamp.isoformat(),
             },
@@ -111,7 +117,7 @@ def get_agent() -> ConversationalAgent:
     return _agent
 
 
-async def handle_turn(client_id: str, channel: str, message: str) -> AgentReply:
+async def handle_turn(chat_id: str, channel: str, message: str) -> AgentReply:
     """Punto de entrada público — agnóstico al canal."""
     agent = get_agent()
-    return await agent.handle_turn(client_id, channel, message)
+    return await agent.handle_turn(chat_id, channel, message)

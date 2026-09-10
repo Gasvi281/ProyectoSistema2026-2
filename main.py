@@ -82,7 +82,7 @@ async def handle_message(chat_id: int, user_text: str) -> None:
         history = chat_history.get_history(chat_id)
         try:
             agent_reply = await handle_turn(
-                client_id=str(chat_id),
+                chat_id=str(chat_id),
                 channel="telegram",
                 message=user_text,
             )
