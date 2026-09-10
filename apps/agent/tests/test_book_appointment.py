@@ -146,8 +146,20 @@ async def test_http_provider_post_body_and_response(monkeypatch):
     assert result["status"] == "PENDING_CONFIRMATION"
 
 
+def test_http_provider_raises_if_no_auth(monkeypatch):
+    """HttpAppointmentBooking falla en construcción si ningún mecanismo de auth está configurado.
+    El envío silencioso sin autenticar quedó eliminado — esto reemplaza
+    test_http_provider_no_auth_header_when_token_absent."""
+    monkeypatch.setenv("BACKEND_URL", "http://localhost:8000")
+    monkeypatch.delenv("BACKEND_SERVICE_TOKEN", raising=False)
+    monkeypatch.delenv("DEV_AGENT_ID", raising=False)
+    with pytest.raises(ValueError, match="BACKEND_SERVICE_TOKEN"):
+        HttpAppointmentBooking()
+
+
 @pytest.mark.asyncio
-async def test_http_provider_no_auth_header_when_token_absent(monkeypatch):
+async def test_http_provider_sends_dev_agent_id_header(monkeypatch):
+    """HttpAppointmentBooking envía X-Dev-Agent-Id cuando solo DEV_AGENT_ID está configurado."""
     import httpx
 
     captured_headers = {}
@@ -167,11 +179,13 @@ async def test_http_provider_no_auth_header_when_token_absent(monkeypatch):
 
     monkeypatch.setenv("BACKEND_URL", "http://localhost:8000")
     monkeypatch.delenv("BACKEND_SERVICE_TOKEN", raising=False)
+    monkeypatch.setenv("DEV_AGENT_ID", "dev-agent-123")
     monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
 
     provider = HttpAppointmentBooking()
     await provider.book(LEAD_ID, SCHEDULED_AT, DURATION_MIN)
 
+    assert captured_headers.get("X-Dev-Agent-Id") == "dev-agent-123"
     assert "Authorization" not in captured_headers
 
 
@@ -185,6 +199,8 @@ def test_factory_fake_mode(monkeypatch):
 
 def test_factory_http_mode(monkeypatch):
     monkeypatch.setenv("APPOINTMENT_BOOKING_MODE", "http")
+    monkeypatch.setenv("BACKEND_URL", "http://localhost:8000")
+    monkeypatch.setenv("DEV_AGENT_ID", "dev-agent-test")
     provider = get_appointment_booking_provider()
     assert isinstance(provider, HttpAppointmentBooking)
 

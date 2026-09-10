@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 from agent.ports import AgentSlotsPort
+from agent.backend_auth import check_backend_config, get_auth_headers
 
 
 def _iso_add_minutes(start_iso: str, minutes: int) -> str:
@@ -27,16 +28,15 @@ class HttpAgentSlots(AgentSlotsPort):
     """Consulta GET /agents/{agent_id}/slots en el backend real."""
 
     def __init__(self):
+        # Falla en construcción si falta BACKEND_URL o cualquier mecanismo de auth
+        # (BACKEND_SERVICE_TOKEN para JWT o DEV_AGENT_ID para bypass de dev).
+        # Así no se hacen peticiones sin autenticar de forma silenciosa.
+        check_backend_config()
         self.base_url = os.getenv("BACKEND_URL", "").rstrip("/")
-        # Auth placeholder: si BACKEND_SERVICE_TOKEN no está seteado no se
-        # envía encabezado — la estrategia de auth final la define el Backend Lead.
-        self.service_token = os.getenv("BACKEND_SERVICE_TOKEN")
 
     async def list_agent_slots(self, agent_id: str, date_from: str, date_to: str) -> dict:
         url = f"{self.base_url}/agents/{agent_id}/slots"
-        headers = {}
-        if self.service_token:
-            headers["Authorization"] = f"Bearer {self.service_token}"
+        headers = get_auth_headers()
 
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(

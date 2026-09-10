@@ -13,21 +13,21 @@ import os
 import httpx
 
 from agent.ports import AppointmentBookingPort
+from agent.backend_auth import check_backend_config, get_auth_headers
 
 
 class HttpAppointmentBooking(AppointmentBookingPort):
     """Llama a POST /leads/{lead_id}/appointments en el backend real."""
 
     def __init__(self):
+        # Falla en construcción si falta BACKEND_URL o cualquier mecanismo de auth
+        # (BACKEND_SERVICE_TOKEN para JWT o DEV_AGENT_ID para bypass de dev).
+        check_backend_config()
         self.base_url = os.getenv("BACKEND_URL", "").rstrip("/")
-        # Auth pendiente: JWT de servicio. Si no está seteado no se envía header.
-        self.service_token = os.getenv("BACKEND_SERVICE_TOKEN")
 
     async def book(self, lead_id: str, scheduled_at: str, duration_min: int) -> dict:
         url = f"{self.base_url}/leads/{lead_id}/appointments"
-        headers = {"Content-Type": "application/json"}
-        if self.service_token:
-            headers["Authorization"] = f"Bearer {self.service_token}"
+        headers = {"Content-Type": "application/json", **get_auth_headers()}
 
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
