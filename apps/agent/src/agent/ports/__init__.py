@@ -75,3 +75,16 @@ class ClientResolverPort(ABC):
         """Retorna el client_id (UUID de backend) para este chat_id.
         phone/full_name son opcionales: aún no se decide si el bot los captura."""
         pass
+
+class LeadPort(ABC):
+    """Puerto para crear/obtener un lead en el backend (POST /leads)."""
+    @abstractmethod
+    async def create_or_get_lead(
+        self, client_id: str, listing_id: str, source_channel: str = "IN_APP"
+    ) -> dict:
+        """Crea o recupera el lead (dedup server-side por client_id+listing_id).
+        Retorna el lead del backend, incluyendo el agent_id derivado:
+        {"id", "client_id", "listing_id", "agent_id", "source_channel", "status",
+         "created_at", "updated_at"}.
+        Lanza httpx.HTTPStatusError en error HTTP (p.ej. 422 por FK inválida)."""
+        pass

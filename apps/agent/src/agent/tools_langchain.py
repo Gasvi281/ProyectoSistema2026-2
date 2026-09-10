@@ -40,6 +40,10 @@ class AgentAvailabilityInput(BaseModel):
     date_from: str = Field(..., description="Inicio del rango a consultar — ISO 8601 con zona horaria, ej. '2026-09-10T00:00:00+00:00'")
     date_to: str = Field(..., description="Fin del rango a consultar — ISO 8601 con zona horaria, ej. '2026-09-17T23:59:59+00:00'")
 
+class CreateLeadInput(BaseModel):
+    client_id: str = Field(..., description="Client ID — usa el que aparece al inicio del mensaje del sistema, nunca lo inventes")
+    listing_id: str = Field(..., description="ID del listing/propiedad del backend por el que el cliente muestra interés")
+
 class BookAppointmentInput(BaseModel):
     lead_id: str = Field(..., description="ID del lead/cliente — usa el que aparece al inicio del mensaje del sistema, nunca lo inventes")
     scheduled_at: str = Field(..., description="Fecha/hora del slot elegido — ISO 8601 con zona horaria, ej. '2026-09-10T09:00:00+00:00'. Debe ser un slot real obtenido de check_agent_availability, nunca inventado")
@@ -177,6 +181,31 @@ async def request_visit(client_id, property_description, preferred_datetime):
         )
     return "No pude enviar la solicitud en este momento, pero tu interés quedó registrado. Intenta de nuevo más tarde."
 
+@tool(args_schema=CreateLeadInput)
+async def create_or_get_lead(client_id, listing_id):
+    """Crea u obtiene el lead del backend para este cliente y listing. Devuelve el
+    lead con su agent_id derivado (úsalo para check_agent_availability) y su id
+    (úsalo como lead_id para book_appointment). Úsala antes de agendar una visita.
+    No inventes client_id ni listing_id — usa solo valores confirmados en la conversación."""
+    import httpx
+    from agent.leads import get_lead_provider
+
+    provider = get_lead_provider()
+    try:
+        # source_channel: IN_APP como stopgap — el backend no acepta TELEGRAM (ask #1).
+        result = await provider.create_or_get_lead(client_id, listing_id, "IN_APP")
+        return {**result, "error": None, "error_code": None}
+    except httpx.HTTPStatusError as e:
+        code = e.response.status_code
+        if code == 422:
+            msg = "client_id o listing_id inválido (no existe en el backend)."
+        else:
+            msg = f"Error del servidor ({code}) al crear el lead."
+        return {"client_id": client_id, "listing_id": listing_id, "error": msg, "error_code": code}
+    except Exception as e:
+        return {"client_id": client_id, "listing_id": listing_id, "error": str(e), "error_code": None}
+
+
 @tool(args_schema=AgentAvailabilityInput)
 async def check_agent_availability(agent_id, date_from, date_to):
     """Consulta los slots disponibles de un agente inmobiliario entre dos fechas.
@@ -218,4 +247,4 @@ async def book_appointment(lead_id, scheduled_at, duration_min=60):
 
 def get_tools():
     """Get all tools."""
-    return [search_properties, answer_property_question, check_availability, schedule_meeting, save_liked_property, request_visit, check_agent_availability, book_appointment]
+    return [search_properties, answer_property_question, check_availability, schedule_meeting, save_liked_property, request_visit, create_or_get_lead, check_agent_availability, book_appointment]

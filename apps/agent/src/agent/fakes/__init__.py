@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 import uuid
 from agent.types import Property, AvailableSlot, Appointment, SearchFilters, ClientInteraction
-from agent.ports import CatalogPort, AvailabilityPort, BookingPort, NotificationsPort, ConversationStorePort, AgentSlotsPort, AppointmentBookingPort, ClientResolverPort
+from agent.ports import CatalogPort, AvailabilityPort, BookingPort, NotificationsPort, ConversationStorePort, AgentSlotsPort, AppointmentBookingPort, ClientResolverPort, LeadPort
 
 class FakeCatalog(CatalogPort):
     def __init__(self):
@@ -123,9 +123,11 @@ class FakeAppointmentBooking(AppointmentBookingPort):
         }
 
 
-# ID de cliente seed verificado contra el backend desplegado (CLAUDE.md).
-# DEUDA TÉCNICA: inválido si se reseedea la DB — mismo riesgo que prop_001-004.
+# Datos de seed verificados contra el backend desplegado (CLAUDE.md).
+# DEUDA TÉCNICA: inválidos si se reseedea la DB — mismo riesgo que prop_001-004.
 SEED_CLIENT_ID = "6cdfee4d-a409-44a4-8a64-cf59ac9ec4ad"
+SEED_LISTING_ID = "c34b9fbb-8d4a-45b8-951a-c8ea585a0afa"
+SEED_AGENT_ID   = "02627f73-1292-4f83-af8c-485bc07a30f2"  # dueño de SEED_LISTING_ID (33 listings)
 
 class FakeClientResolver(ClientResolverPort):
     """Mapea cualquier chat_id al client_id de seed, de forma estable en memoria.
@@ -138,6 +140,36 @@ class FakeClientResolver(ClientResolverPort):
 
     async def resolve_client(self, chat_id: str, phone: str | None = None, full_name: str | None = None) -> str:
         return self._map.setdefault(chat_id, SEED_CLIENT_ID)
+
+
+class FakeLead(LeadPort):
+    """Crea/recupera un lead en memoria, emulando el upsert por (client_id, listing_id).
+
+    El backend hace dedup server-side — el bot nunca hace pre-check. Este fake modela
+    ese contrato: la misma combinación (client_id, listing_id) devuelve el mismo lead.
+    agent_id = SEED_AGENT_ID para que la cadena lead→check_agent_availability sea
+    consistente con los datos reales de seed (FakeAgentSlots lo espeja sin mapear).
+    """
+    def __init__(self):
+        self._leads: dict[tuple[str, str], dict] = {}
+
+    async def create_or_get_lead(self, client_id: str, listing_id: str, source_channel: str = "IN_APP") -> dict:
+        key = (client_id, listing_id)
+        if key in self._leads:
+            return self._leads[key]          # get: mismo lead que la llamada previa
+        now = datetime.now(timezone.utc).isoformat()
+        lead = {
+            "id": f"lead-{uuid.uuid4().hex[:8]}",
+            "client_id": client_id,
+            "listing_id": listing_id,
+            "agent_id": SEED_AGENT_ID,       # el backend lo deriva; el fake usa el de seed
+            "source_channel": source_channel,
+            "status": "NEW",
+            "created_at": now,
+            "updated_at": now,
+        }
+        self._leads[key] = lead
+        return lead
 
 
 class FakeConversationStore(ConversationStorePort):
