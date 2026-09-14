@@ -44,6 +44,16 @@ class HttpClientResolver(ClientResolverPort):
 
     def __init__(self):
         check_backend_config()
+        # Fail-loud: AGENCY_ID identifica al CALLER (service account) ante el backend.
+        # Si falta o está vacío, get_auth_headers omitiría X-Agency-Id y POST /clients
+        # devolvería un 400 confuso a mitad de conversación. Preferimos fallar al
+        # construir el resolver (una vez), no por request.
+        self.caller_agency_id = os.getenv("AGENCY_ID")
+        if not self.caller_agency_id:
+            raise ValueError(
+                "AGENCY_ID no está seteado — requerido para identificar al caller "
+                "ante el backend (X-Agency-Id en POST /clients)."
+            )
         self.base_url = os.getenv("BACKEND_URL", "").rstrip("/")
 
     async def resolve_client(
@@ -60,11 +70,10 @@ class HttpClientResolver(ClientResolverPort):
         # X-Agency-Id identifica al CALLER (service account); el backend lo exige
         # para toda service account. NO scopea datos (el cliente es global) y NO es
         # el agency-del-listing que agency_registry resuelve desde listing_id — es
-        # la identidad estática del bot (env AGENCY_ID).
-        caller_agency_id = os.getenv("AGENCY_ID")
+        # la identidad estática del bot (validada en __init__ como self.caller_agency_id).
         headers = {
             "Content-Type": "application/json",
-            **(await get_auth_headers(caller_agency_id)),
+            **(await get_auth_headers(self.caller_agency_id)),
         }
         body = {
             "full_name": full_name,

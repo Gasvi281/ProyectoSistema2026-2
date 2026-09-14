@@ -25,6 +25,7 @@ from agent.fakes import FakeClientResolver
 _VALID_ENV = {
     "BACKEND_URL": "https://fake-backend.test",
     "BACKEND_SERVICE_TOKEN": "tok-test",
+    "AGENCY_ID": "8768a84f-a76a-4de6-8e9e-1a11fcbb4e59",
 }
 
 _CHAT_ID = "123456789"
@@ -243,3 +244,15 @@ async def test_factory_fake_mode_returns_fake_resolver(monkeypatch):
 
     provider = get_client_resolver_provider()
     assert isinstance(provider, FakeClientResolver)
+
+
+# ---------------------------------------------------------------------------
+# (11) Guard fail-loud: AGENCY_ID ausente → ValueError al construir
+# ---------------------------------------------------------------------------
+
+async def test_missing_agency_id_raises_on_construction(monkeypatch):
+    """Sin AGENCY_ID, construir HttpClientResolver falla fuerte (no un 400 tardío)."""
+    _set_valid_env(monkeypatch)
+    monkeypatch.delenv("AGENCY_ID", raising=False)
+    with pytest.raises(ValueError, match="AGENCY_ID"):
+        HttpClientResolver()
