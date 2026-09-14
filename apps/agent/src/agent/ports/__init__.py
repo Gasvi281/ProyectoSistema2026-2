@@ -88,3 +88,12 @@ class LeadPort(ABC):
          "created_at", "updated_at"}.
         Lanza httpx.HTTPStatusError en error HTTP (p.ej. 422 por FK inválida)."""
         pass
+
+class ListingAgencyResolverPort(ABC):
+    """Resuelve un listing_id al agency_id dueño (para el header X-Agency-Id)."""
+    @abstractmethod
+    async def resolve(self, listing_id: str) -> str:
+        """Retorna el agency_id (UUID) dueño del listing.
+        Lanza UnknownListingError si el listing no está mapeado a ninguna
+        agencia conocida (nunca retorna None ni un default silencioso)."""
+        pass

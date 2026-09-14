@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 import uuid
 from agent.types import Property, AvailableSlot, Appointment, SearchFilters, ClientInteraction
-from agent.ports import CatalogPort, AvailabilityPort, BookingPort, NotificationsPort, ConversationStorePort, AgentSlotsPort, AppointmentBookingPort, ClientResolverPort, LeadPort
+from agent.ports import CatalogPort, AvailabilityPort, BookingPort, NotificationsPort, ConversationStorePort, AgentSlotsPort, AppointmentBookingPort, ClientResolverPort, LeadPort, ListingAgencyResolverPort
 
 class FakeCatalog(CatalogPort):
     def __init__(self):
@@ -123,6 +123,22 @@ class FakeAppointmentBooking(AppointmentBookingPort):
         }
 
 
+# Agency IDs reales del backend (verificados). Universo de agencias válidas.
+# DEUDA TÉCNICA: inválidos si se reseedea la DB — mismo riesgo que prop_001-004.
+KNOWN_AGENCY_IDS: frozenset[str] = frozenset({
+    "8768a84f-a76a-4de6-8e9e-1a11fcbb4e59",  # Cruz-Oviedo Realty
+    "bdd640fb-0667-4ad1-9c80-317fa3b1799d",  # González, Villamizar and Vargas Realty
+    "bb5e4bcf-15ed-4269-9429-6c07f26b4776",  # Martínez PLC Realty
+    "66b2bc5b-50c1-47fc-8e17-7b4e0837b8a3",  # Pinto LLC Realty
+    "3c835dc0-d944-4fa5-80e9-ab30ed2662e9",  # Ramírez PLC Realty
+    "060edf5b-3911-4497-ba43-b2badf0f06cb",  # Sánchez, Hernández and Álvarez Realty
+})
+
+
+class UnknownListingError(KeyError):
+    """El listing_id no está mapeado a ninguna agencia conocida."""
+
+
 # Datos de seed verificados contra el backend desplegado (CLAUDE.md).
 # DEUDA TÉCNICA: inválidos si se reseedea la DB — mismo riesgo que prop_001-004.
 SEED_CLIENT_ID = "6cdfee4d-a409-44a4-8a64-cf59ac9ec4ad"
@@ -188,3 +204,23 @@ class FakeConversationStore(ConversationStorePort):
     
     async def record_liked_property(self, client_id: str, property_id: str) -> None:
         self.liked[client_id].add(property_id)
+
+
+class FakeListingAgencyResolver(ListingAgencyResolverPort):
+    """Mapea listing_id → agency_id en memoria.
+
+    Arranca vacío (aún no hay listings reales del backend). Los pares se
+    pasan por el constructor en tests. Los agency_ids válidos viven en
+    KNOWN_AGENCY_IDS.
+    """
+
+    def __init__(self, mapping: dict[str, str] | None = None):
+        self._map: dict[str, str] = dict(mapping or {})
+
+    async def resolve(self, listing_id: str) -> str:
+        try:
+            return self._map[listing_id]
+        except KeyError:
+            raise UnknownListingError(
+                f"listing_id {listing_id!r} no está mapeado a ninguna agencia conocida"
+            )
