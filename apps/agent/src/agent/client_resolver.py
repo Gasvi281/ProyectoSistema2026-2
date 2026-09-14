@@ -7,8 +7,12 @@ mediante POST /clients (create-or-get idempotente por telegram_user_id).
 Mismo patrón que agent_slots.py / booking.py / leads.py:
 - __init__ llama a check_backend_config() y lee BACKEND_URL.
 - Una instancia de httpx.AsyncClient por llamada (context manager).
-- Auth via get_auth_headers(None): solo Authorization, sin X-Agency-Id
-  (el endpoint /clients es global, no perteneciente a ninguna agencia).
+- Auth via get_auth_headers(caller_agency_id): Authorization + X-Agency-Id.
+  El recurso /clients es global a nivel de DATOS (core.client no tiene columna
+  agency_id), pero el backend exige X-Agency-Id igual para IDENTIFICAR al caller
+  (service account → cuál fila AI_AGENT activar). Es identidad de auth, no
+  scoping de datos. Este agency_id es el del CALLER (estático, env AGENCY_ID),
+  NO el del listing (que agency_registry resuelve tarde desde listing_id).
 - raise_for_status() delega el manejo de errores al caller.
 
 Contrato del backend (confirmado commit ba2def5, main, desplegado):
@@ -53,8 +57,15 @@ class HttpClientResolver(ClientResolverPort):
         full_name = full_name or f"Telegram user {chat_id}"
 
         url = f"{self.base_url}/clients"
-        # get_auth_headers(None): sin X-Agency-Id — /clients es global (no per-agencia).
-        headers = {"Content-Type": "application/json", **(await get_auth_headers(None))}
+        # X-Agency-Id identifica al CALLER (service account); el backend lo exige
+        # para toda service account. NO scopea datos (el cliente es global) y NO es
+        # el agency-del-listing que agency_registry resuelve desde listing_id — es
+        # la identidad estática del bot (env AGENCY_ID).
+        caller_agency_id = os.getenv("AGENCY_ID")
+        headers = {
+            "Content-Type": "application/json",
+            **(await get_auth_headers(caller_agency_id)),
+        }
         body = {
             "full_name": full_name,
             "phone": phone,

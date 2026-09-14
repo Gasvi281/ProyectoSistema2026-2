@@ -161,9 +161,10 @@ async def test_body_passes_phone_through(monkeypatch):
 # (6) Headers: Authorization presente; X-Agency-Id ausente
 # ---------------------------------------------------------------------------
 
-async def test_headers_auth_present_no_agency_id(monkeypatch):
-    """Authorization está en los headers; X-Agency-Id NO (cliente es global)."""
+async def test_headers_include_caller_agency_id(monkeypatch):
+    """Authorization + X-Agency-Id (identidad del caller, env AGENCY_ID)."""
     _set_valid_env(monkeypatch)
+    monkeypatch.setenv("AGENCY_ID", "8768a84f-a76a-4de6-8e9e-1a11fcbb4e59")
     captured = {}
 
     async def mock_post(self, url, *, json=None, headers=None, **kw):
@@ -176,7 +177,7 @@ async def test_headers_auth_present_no_agency_id(monkeypatch):
     await resolver.resolve_client(_CHAT_ID)
 
     assert "Authorization" in captured["headers"]
-    assert "X-Agency-Id" not in captured["headers"]
+    assert captured["headers"]["X-Agency-Id"] == "8768a84f-a76a-4de6-8e9e-1a11fcbb4e59"
 
 
 # ---------------------------------------------------------------------------
