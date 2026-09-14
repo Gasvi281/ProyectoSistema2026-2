@@ -13,7 +13,8 @@ import pytest
 
 from agent import agency_registry
 from agent.agency_registry import UnregisteredEntityError
-from agent.backend_auth import get_auth_headers
+from agent.backend_auth import get_auth_headers, _reset_provider_for_tests
+import agent.backend_auth as backend_auth_module
 
 # Agency IDs de prueba (no tienen que ser los de seed — solo distintos entre sí)
 AGENCY_X = "8768a84f-a76a-4de6-8e9e-1a11fcbb4e59"  # Cruz-Oviedo Realty
@@ -64,16 +65,20 @@ def test_unregistered_id_raises():
 # (a) Registro correcto → get_auth_headers emite X-Agency-Id
 # ---------------------------------------------------------------------------
 
-def test_get_auth_headers_includes_agency_id(monkeypatch):
+async def test_get_auth_headers_includes_agency_id(monkeypatch):
     monkeypatch.setenv("BACKEND_SERVICE_TOKEN", "tok-test")
-    headers = get_auth_headers(agency_id=AGENCY_X)
+    monkeypatch.delenv("BOT_EMAIL", raising=False)
+    monkeypatch.delenv("BOT_PASSWORD", raising=False)
+    headers = await get_auth_headers(agency_id=AGENCY_X)
     assert headers["X-Agency-Id"] == AGENCY_X
     assert headers["Authorization"] == "Bearer tok-test"
 
 
-def test_get_auth_headers_without_agency_id_omits_header(monkeypatch):
+async def test_get_auth_headers_without_agency_id_omits_header(monkeypatch):
     monkeypatch.setenv("BACKEND_SERVICE_TOKEN", "tok-test")
-    headers = get_auth_headers()
+    monkeypatch.delenv("BOT_EMAIL", raising=False)
+    monkeypatch.delenv("BOT_PASSWORD", raising=False)
+    headers = await get_auth_headers()
     assert "X-Agency-Id" not in headers
 
 
@@ -208,3 +213,103 @@ async def test_http_appointment_booking_lookup_produces_correct_agency_header(mo
     await adapter.book(LEAD_X, "2026-09-10T09:00:00+00:00", 60)
 
     assert captured_headers.get("X-Agency-Id") == AGENCY_X
+
+
+# ---------------------------------------------------------------------------
+# Precedencia de autenticación en get_auth_headers() (tarea de wiring)
+# ---------------------------------------------------------------------------
+# Todos los tests usan _reset_provider_for_tests() para descartar cualquier
+# singleton vivo entre casos, y un fake provider para no llamar a Supabase.
+# No llevan @pytest.mark.asyncio — asyncio_mode = "auto" en pyproject.toml.
+
+class _FakeProvider:
+    """Provider falso que devuelve un token fijo sin hacer ningún HTTP."""
+    async def get_token(self) -> str:
+        return "jwt-live-tok"
+
+
+@pytest.fixture(autouse=False)
+def reset_jwt_provider():
+    """Descarta el singleton JWT antes y después de cada test de precedencia."""
+    _reset_provider_for_tests()
+    yield
+    _reset_provider_for_tests()
+
+
+async def test_jwt_preferred_over_static_token(monkeypatch, reset_jwt_provider):
+    """BOT_EMAIL+BOT_PASSWORD configurados → live JWT; BACKEND_SERVICE_TOKEN ignorado."""
+    monkeypatch.setenv("BOT_EMAIL", "bot@example.com")
+    monkeypatch.setenv("BOT_PASSWORD", "s3cr3t")
+    monkeypatch.setenv("BACKEND_SERVICE_TOKEN", "static-tok")
+    backend_auth_module._provider = _FakeProvider()  # type: ignore[assignment]
+
+    headers = await get_auth_headers()
+
+    assert headers["Authorization"] == "Bearer jwt-live-tok"
+    assert "X-Dev-Agent-Id" not in headers
+
+
+async def test_jwt_beats_static_token_with_agency_id(monkeypatch, reset_jwt_provider):
+    """Cuando ambos BOT_* y BACKEND_SERVICE_TOKEN están configurados, X-Agency-Id
+    se emite correctamente usando el live JWT."""
+    monkeypatch.setenv("BOT_EMAIL", "bot@example.com")
+    monkeypatch.setenv("BOT_PASSWORD", "s3cr3t")
+    monkeypatch.setenv("BACKEND_SERVICE_TOKEN", "static-tok")
+    backend_auth_module._provider = _FakeProvider()  # type: ignore[assignment]
+
+    headers = await get_auth_headers(agency_id=AGENCY_X)
+
+    assert headers["Authorization"] == "Bearer jwt-live-tok"
+    assert headers["X-Agency-Id"] == AGENCY_X
+
+
+async def test_fallback_to_static_token(monkeypatch, reset_jwt_provider):
+    """Sin BOT_*, con BACKEND_SERVICE_TOKEN → Authorization Bearer estático."""
+    monkeypatch.delenv("BOT_EMAIL", raising=False)
+    monkeypatch.delenv("BOT_PASSWORD", raising=False)
+    monkeypatch.setenv("BACKEND_SERVICE_TOKEN", "static-only")
+
+    headers = await get_auth_headers()
+
+    assert headers["Authorization"] == "Bearer static-only"
+    assert "X-Dev-Agent-Id" not in headers
+
+
+async def test_fallback_to_dev_bypass(monkeypatch, reset_jwt_provider):
+    """Sin BOT_* ni token estático, con DEV_AGENT_ID → X-Dev-Agent-Id; sin Authorization."""
+    monkeypatch.delenv("BOT_EMAIL", raising=False)
+    monkeypatch.delenv("BOT_PASSWORD", raising=False)
+    monkeypatch.delenv("BACKEND_SERVICE_TOKEN", raising=False)
+    monkeypatch.setenv("DEV_AGENT_ID", "dev-agent-xyz")
+
+    headers = await get_auth_headers()
+
+    assert headers.get("X-Dev-Agent-Id") == "dev-agent-xyz"
+    assert "Authorization" not in headers
+
+
+@pytest.mark.parametrize("present,missing", [
+    ("BOT_EMAIL", "BOT_PASSWORD"),
+    ("BOT_PASSWORD", "BOT_EMAIL"),
+])
+async def test_half_configured_bot_vars_raise(monkeypatch, reset_jwt_provider, present, missing):
+    """Exactamente uno de BOT_EMAIL/BOT_PASSWORD configurado → ValueError fail-loud,
+    aunque BACKEND_SERVICE_TOKEN también esté disponible (no hay fall-through)."""
+    monkeypatch.setenv(present, "algún-valor")
+    monkeypatch.delenv(missing, raising=False)
+    monkeypatch.setenv("BACKEND_SERVICE_TOKEN", "static-tok")  # no debe usarse
+
+    with pytest.raises(ValueError, match=missing):
+        await get_auth_headers()
+
+
+def test_check_backend_config_accepts_bot_email_password(monkeypatch):
+    """check_backend_config no lanza si BACKEND_URL + BOT_EMAIL + BOT_PASSWORD están."""
+    from agent.backend_auth import check_backend_config
+    monkeypatch.setenv("BACKEND_URL", "https://homelitics.example.com")
+    monkeypatch.setenv("BOT_EMAIL", "bot@example.com")
+    monkeypatch.setenv("BOT_PASSWORD", "s3cr3t")
+    monkeypatch.delenv("BACKEND_SERVICE_TOKEN", raising=False)
+    monkeypatch.delenv("DEV_AGENT_ID", raising=False)
+
+    check_backend_config()  # no debe lanzar

@@ -41,7 +41,7 @@ class HttpAgentSlots(AgentSlotsPort):
         agency_id = agency_registry.lookup(agent_id)
 
         url = f"{self.base_url}/agents/{agent_id}/slots"
-        headers = get_auth_headers(agency_id)
+        headers = await get_auth_headers(agency_id)
 
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(

@@ -36,7 +36,7 @@ class HttpLead(LeadPort):
         agency_id = agency_registry.lookup(listing_id)
 
         url = f"{self.base_url}/leads"
-        headers = {"Content-Type": "application/json", **get_auth_headers(agency_id)}
+        headers = {"Content-Type": "application/json", **(await get_auth_headers(agency_id))}
         body = {
             "client_id": client_id,
             "listing_id": listing_id,
