@@ -14,6 +14,7 @@ import httpx
 
 from agent.ports import AppointmentBookingPort
 from agent.backend_auth import check_backend_config, get_auth_headers
+from agent import agency_registry
 
 
 class HttpAppointmentBooking(AppointmentBookingPort):
@@ -26,8 +27,12 @@ class HttpAppointmentBooking(AppointmentBookingPort):
         self.base_url = os.getenv("BACKEND_URL", "").rstrip("/")
 
     async def book(self, lead_id: str, scheduled_at: str, duration_min: int) -> dict:
+        # Lanza UnregisteredEntityError si create_or_get_lead no fue llamado antes.
+        # Esto refuerza el orden obligatorio: lead → slots → appointment (CLAUDE.md).
+        agency_id = agency_registry.lookup(lead_id)
+
         url = f"{self.base_url}/leads/{lead_id}/appointments"
-        headers = {"Content-Type": "application/json", **get_auth_headers()}
+        headers = {"Content-Type": "application/json", **get_auth_headers(agency_id)}
 
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(

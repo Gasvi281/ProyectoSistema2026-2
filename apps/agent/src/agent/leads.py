@@ -14,6 +14,7 @@ import httpx
 
 from agent.ports import LeadPort
 from agent.backend_auth import check_backend_config, get_auth_headers
+from agent import agency_registry
 
 
 class HttpLead(LeadPort):
@@ -28,8 +29,14 @@ class HttpLead(LeadPort):
     async def create_or_get_lead(
         self, client_id: str, listing_id: str, source_channel: str = "IN_APP"
     ) -> dict:
+        # Lanza UnregisteredEntityError si el tool wrapper no registró el listing_id
+        # antes de esta llamada (ocurre cuando el listing no está mapeado a ninguna
+        # agencia conocida). Igual que en HttpAgentSlots y HttpAppointmentBooking:
+        # X-Agency-Id nunca se omite silenciosamente.
+        agency_id = agency_registry.lookup(listing_id)
+
         url = f"{self.base_url}/leads"
-        headers = {"Content-Type": "application/json", **get_auth_headers()}
+        headers = {"Content-Type": "application/json", **get_auth_headers(agency_id)}
         body = {
             "client_id": client_id,
             "listing_id": listing_id,

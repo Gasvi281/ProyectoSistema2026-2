@@ -16,26 +16,35 @@ sin autenticación que existía antes.
 import os
 
 
-def get_auth_headers() -> dict:
+def get_auth_headers(agency_id: str | None = None) -> dict:
     """
     Retorna los encabezados de autenticación para llamadas al backend.
 
     Precedencia: BACKEND_SERVICE_TOKEN (Bearer) → DEV_AGENT_ID (X-Dev-Agent-Id).
     Lanza ValueError si ninguno está configurado — esto no debería ocurrir si
     se llamó a check_backend_config() en __init__.
+
+    Si se pasa agency_id, agrega el encabezado X-Agency-Id que el backend
+    requiere para scoping de tenant.
     """
     token = os.getenv("BACKEND_SERVICE_TOKEN")
     dev_agent_id = os.getenv("DEV_AGENT_ID")
 
     if token:
-        return {"Authorization": f"Bearer {token}"}
-    if dev_agent_id:
-        return {"X-Dev-Agent-Id": dev_agent_id}
-    raise ValueError(
-        "Se requiere al menos un mecanismo de autenticación para el backend: "
-        "BACKEND_SERVICE_TOKEN (JWT de Supabase) o DEV_AGENT_ID (bypass de dev). "
-        "Ninguno está configurado."
-    )
+        headers: dict = {"Authorization": f"Bearer {token}"}
+    elif dev_agent_id:
+        headers = {"X-Dev-Agent-Id": dev_agent_id}
+    else:
+        raise ValueError(
+            "Se requiere al menos un mecanismo de autenticación para el backend: "
+            "BACKEND_SERVICE_TOKEN (JWT de Supabase) o DEV_AGENT_ID (bypass de dev). "
+            "Ninguno está configurado."
+        )
+
+    if agency_id:
+        headers["X-Agency-Id"] = agency_id
+
+    return headers
 
 
 def check_backend_config() -> None:

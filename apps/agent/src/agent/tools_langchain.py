@@ -189,11 +189,33 @@ async def create_or_get_lead(client_id, listing_id):
     No inventes client_id ni listing_id — usa solo valores confirmados en la conversación."""
     import httpx
     from agent.leads import get_lead_provider
+    from agent.listing_agency_resolver import get_listing_agency_resolver_provider
+    from agent import agency_registry
+    from agent.fakes import UnknownListingError
+
+    # Resolver listing_id → agency_id antes de llamar al backend, de modo que
+    # HttpLead pueda incluir X-Agency-Id en POST /leads.
+    resolver = get_listing_agency_resolver_provider()
+    try:
+        agency_id: str | None = await resolver.resolve(listing_id)
+        agency_registry.register(listing_id=listing_id, agency_id=agency_id)
+    except UnknownListingError:
+        # Listing no mapeado a ninguna agencia conocida: HttpLead lanzará
+        # UnregisteredEntityError — el tool retorna error al LLM.
+        agency_id = None
 
     provider = get_lead_provider()
     try:
         # source_channel: IN_APP como stopgap — el backend no acepta TELEGRAM (ask #1).
         result = await provider.create_or_get_lead(client_id, listing_id, "IN_APP")
+        # Registrar también bajo lead_id y agent_id para que HttpAppointmentBooking
+        # y HttpAgentSlots puedan recuperar el agency_id por sus propios ids.
+        if agency_id is not None:
+            agency_registry.register(
+                lead_id=result["id"],
+                agent_id=result["agent_id"],
+                agency_id=agency_id,
+            )
         return {**result, "error": None, "error_code": None}
     except httpx.HTTPStatusError as e:
         code = e.response.status_code

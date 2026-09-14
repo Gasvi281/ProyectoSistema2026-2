@@ -5,6 +5,7 @@ from agent.tools_langchain import check_agent_availability
 from agent.agent_slots import _iso_add_minutes, HttpAgentSlots
 from agent.fakes import FakeAgentSlots
 from agent.ports import AgentSlotsPort
+from agent import agency_registry
 
 
 DATE_FROM = "2026-09-10T00:00:00+00:00"
@@ -109,6 +110,8 @@ async def test_http_provider_parses_response(monkeypatch):
     monkeypatch.setenv("BACKEND_URL", "http://localhost:8000")
     monkeypatch.setenv("BACKEND_SERVICE_TOKEN", "test-token")
     monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
+    # El adapter requiere que el agent_id esté en el registry (Alt 3).
+    agency_registry.register(agent_id=AGENT_ID, agency_id="agency-test-x")
 
     provider = HttpAgentSlots()
     result = await provider.list_agent_slots(AGENT_ID, DATE_FROM, DATE_TO)

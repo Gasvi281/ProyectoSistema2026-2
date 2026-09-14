@@ -7,6 +7,7 @@ from agent.leads import HttpLead, get_lead_provider
 from agent.fakes import FakeLead
 from agent.fakes import SEED_AGENT_ID, SEED_LISTING_ID, SEED_CLIENT_ID
 from agent.ports import LeadPort
+from agent import agency_registry
 
 
 CLIENT_ID  = SEED_CLIENT_ID
@@ -122,6 +123,8 @@ async def test_http_provider_post_body_and_response(monkeypatch):
     monkeypatch.setenv("BACKEND_URL", "http://localhost:8000")
     monkeypatch.setenv("BACKEND_SERVICE_TOKEN", "test-token")
     monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
+    # El adapter requiere que el listing_id esté en el registry (Alt 3).
+    agency_registry.register(listing_id=LISTING_ID, agency_id="agency-test-x")
 
     provider = HttpLead()
     result = await provider.create_or_get_lead(CLIENT_ID, LISTING_ID)

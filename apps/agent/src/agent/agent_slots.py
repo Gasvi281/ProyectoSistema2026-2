@@ -15,6 +15,7 @@ import httpx
 
 from agent.ports import AgentSlotsPort
 from agent.backend_auth import check_backend_config, get_auth_headers
+from agent import agency_registry
 
 
 def _iso_add_minutes(start_iso: str, minutes: int) -> str:
@@ -35,8 +36,12 @@ class HttpAgentSlots(AgentSlotsPort):
         self.base_url = os.getenv("BACKEND_URL", "").rstrip("/")
 
     async def list_agent_slots(self, agent_id: str, date_from: str, date_to: str) -> dict:
+        # Lanza UnregisteredEntityError si create_or_get_lead no fue llamado antes.
+        # Esto refuerza el orden obligatorio: lead → slots → appointment (CLAUDE.md).
+        agency_id = agency_registry.lookup(agent_id)
+
         url = f"{self.base_url}/agents/{agent_id}/slots"
-        headers = get_auth_headers()
+        headers = get_auth_headers(agency_id)
 
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(

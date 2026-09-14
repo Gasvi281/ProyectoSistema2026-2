@@ -4,6 +4,7 @@ from agent.tools_langchain import book_appointment
 from agent.booking import HttpAppointmentBooking, get_appointment_booking_provider
 from agent.fakes import FakeAppointmentBooking
 from agent.ports import AppointmentBookingPort
+from agent import agency_registry
 
 
 LEAD_ID = "lead-test-001"
@@ -134,6 +135,8 @@ async def test_http_provider_post_body_and_response(monkeypatch):
     monkeypatch.setenv("BACKEND_URL", "http://localhost:8000")
     monkeypatch.setenv("BACKEND_SERVICE_TOKEN", "test-token")
     monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
+    # El adapter requiere que el lead_id esté en el registry (Alt 3).
+    agency_registry.register(lead_id=LEAD_ID, agency_id="agency-test-x")
 
     provider = HttpAppointmentBooking()
     result = await provider.book(LEAD_ID, SCHEDULED_AT, DURATION_MIN)
@@ -181,6 +184,8 @@ async def test_http_provider_sends_dev_agent_id_header(monkeypatch):
     monkeypatch.delenv("BACKEND_SERVICE_TOKEN", raising=False)
     monkeypatch.setenv("DEV_AGENT_ID", "dev-agent-123")
     monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
+    # El adapter requiere que el lead_id esté en el registry (Alt 3).
+    agency_registry.register(lead_id=LEAD_ID, agency_id="agency-test-x")
 
     provider = HttpAppointmentBooking()
     await provider.book(LEAD_ID, SCHEDULED_AT, DURATION_MIN)
