@@ -1,10 +1,19 @@
 """REPL interactivo para el agente."""
 import asyncio
+import logging
+import os
 from pathlib import Path
 from dotenv import load_dotenv
 
 # apps/agent/.env — tres niveles arriba desde src/agent/
 load_dotenv(Path(__file__).parent.parent.parent / ".env")
+
+if os.getenv("AGENT_DEBUG", "").lower() in ("1", "true", "yes"):
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(message)s"))
+    _steps_logger = logging.getLogger("agent.steps")
+    _steps_logger.setLevel(logging.DEBUG)
+    _steps_logger.addHandler(_handler)
 
 from agent.core_langchain import get_agent
 

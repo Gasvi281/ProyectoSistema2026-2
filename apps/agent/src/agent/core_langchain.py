@@ -1,16 +1,75 @@
 """Core agent usando LangGraph ReAct con tools."""
 import os
+import json
+import logging
 import uuid
 from datetime import datetime
 from typing import Optional
 
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 
 from agent.types import AgentReply, ClientInteraction
 from agent.llm import get_langchain_llm
 from agent.tools_langchain import get_tools
 from agent.fakes import FakeConversationStore
 from agent.client_resolver import get_client_resolver_provider
+
+logger = logging.getLogger("agent.steps")
+
+
+def _log_steps(messages: list) -> None:
+    """Imprime cada paso intermedio del ciclo ReAct cuando AGENT_DEBUG=true.
+
+    Muestra AIMessage con tool_calls (decisión de invocar una herramienta),
+    ToolMessage (resultado devuelto por la herramienta) y AIMessage sin
+    tool_calls que no sea el último mensaje (razonamientos intermedios).
+    El primer HumanMessage y la respuesta final se omiten — ya los ve el caller.
+    """
+    if os.getenv("AGENT_DEBUG", "").lower() not in ("1", "true", "yes"):
+        return
+
+    # Saltamos el primer HumanMessage y el último AIMessage (respuesta final).
+    steps = messages[1:-1]
+    if not steps:
+        return
+
+    sep = "─" * 60
+    logger.debug("\n%s  AGENT STEPS  %s", sep, sep)
+
+    for i, msg in enumerate(steps, start=1):
+        kind = type(msg).__name__
+
+        if isinstance(msg, AIMessage) and msg.tool_calls:
+            for tc in msg.tool_calls:
+                try:
+                    args_str = json.dumps(tc.get("args", {}), ensure_ascii=False, indent=2)
+                except Exception:
+                    args_str = str(tc.get("args", {}))
+                logger.debug(
+                    "[paso %d] TOOL CALL → %s\n%s", i, tc.get("name", "?"), args_str
+                )
+
+        elif isinstance(msg, ToolMessage):
+            content = msg.content
+            if isinstance(content, (dict, list)):
+                try:
+                    content = json.dumps(content, ensure_ascii=False, indent=2)
+                except Exception:
+                    content = str(content)
+            logger.debug("[paso %d] TOOL RESULT (%s)\n%s", i, msg.name, content)
+
+        elif isinstance(msg, AIMessage):
+            text = _extract_text_static(msg.content)
+            if text.strip():
+                logger.debug("[paso %d] RAZONAMIENTO INTERMEDIO\n%s", i, text)
+
+    logger.debug("%s  FIN STEPS  %s\n", sep, sep)
+
+
+def _extract_text_static(content) -> str:
+    if isinstance(content, list):
+        return " ".join(b.get("text", "") for b in content if isinstance(b, dict))
+    return str(content)
 
 
 def _tool_error_to_message(e: Exception) -> str:
@@ -69,13 +128,6 @@ class ConversationalAgent:
             )
         return self._executor
 
-    @staticmethod
-    def _extract_text(content) -> str:
-        """Gemini 3.x devuelve content como lista de bloques."""
-        if isinstance(content, list):
-            return " ".join(b.get("text", "") for b in content if isinstance(b, dict))
-        return str(content)
-
     async def handle_turn(self, chat_id: str, channel: str, message: str) -> AgentReply:
         mode = os.getenv("AGENT_LLM_MODE", "fake").lower()
 
@@ -96,7 +148,8 @@ class ConversationalAgent:
                     {"messages": [HumanMessage(content=contextual_message)]},
                     config=config,
                 )
-                reply_text = self._extract_text(result["messages"][-1].content)
+                _log_steps(result["messages"])
+                reply_text = _extract_text_static(result["messages"][-1].content)
             else:
                 # Modo fake: sin LangGraph (FakeLLM no soporta bind_tools).
                 # No se resuelve client_id — no hay tools que lo consuman aquí.
