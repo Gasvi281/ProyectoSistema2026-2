@@ -160,6 +160,7 @@ async def request_visit(client_id, property_description, preferred_datetime):
     request directly to the human agent by email, based only on what the
     client described in the conversation. Do not invent a client_id — use
     the one given in the system context for this conversation."""
+    import os
     import uuid
     from agent.notifications import send_manual_visit_request
 
@@ -173,13 +174,23 @@ async def request_visit(client_id, property_description, preferred_datetime):
         print(f"[request_visit] No se pudo notificar al agente: {e}")
         return "Tuve un problema enviando tu solicitud, intenta de nuevo en un momento."
 
-    if ok:
+    if not ok:
+        return "No pude enviar la solicitud en este momento, pero tu interés quedó registrado. Intenta de nuevo más tarde."
+
+    # El aviso real solo sale cuando NOTIFICATIONS_MODE=email. En modo fake,
+    # send_manual_visit_request solo imprime en consola — no llega nada a ningún
+    # agente humano. Usamos el mismo criterio que esa función para decidir
+    # qué mensaje es honesto devolver.
+    if os.getenv("NOTIFICATIONS_MODE", "fake").lower() == "email":
         return (
             f"Listo, envié tu solicitud de visita al agente inmobiliario. "
             f"Te contactará pronto para confirmar disponibilidad. "
             f"ID de referencia: {appointment_id}"
         )
-    return "No pude enviar la solicitud en este momento, pero tu interés quedó registrado. Intenta de nuevo más tarde."
+    return (
+        f"Registré tu solicitud de visita (entorno de prueba: todavía no se "
+        f"envió un aviso real a un agente). ID de referencia: {appointment_id}"
+    )
 
 @tool(args_schema=CreateLeadInput)
 async def create_or_get_lead(client_id, listing_id):

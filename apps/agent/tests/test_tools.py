@@ -3,6 +3,7 @@ import pytest
 from agent.fakes import FakeCatalog, FakeAvailability, FakeBooking
 from agent.types import SearchFilters
 from datetime import datetime
+from agent.tools_langchain import request_visit
 
 @pytest.mark.asyncio
 async def test_search_returns_results():
@@ -53,3 +54,48 @@ async def test_booking_confirmation():
     appointment = await booking.create_appointment("prop_001", "client_001", "slot_001")
     confirmed = await booking.confirm_appointment(appointment.id)
     assert confirmed.status == "confirmed"
+
+
+# ---------------------------------------------------------------------------
+# request_visit — honesty tests (Task A fix)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_request_visit_fake_mode_does_not_claim_human_notified(monkeypatch):
+    """En modo fake, request_visit NO debe afirmar que se notificó a un agente real."""
+    monkeypatch.delenv("NOTIFICATIONS_MODE", raising=False)  # asegura modo fake
+    result = await request_visit.ainvoke({
+        "client_id": "client_test",
+        "property_description": "Apartamento en Laureles",
+        "preferred_datetime": "mañana en la tarde",
+    })
+    # El mensaje honesto debe mencionar "prueba" o "entorno" — nunca debe decir
+    # "envié" ni "agente inmobiliario" como si el aviso real se hubiera mandado.
+    result_lower = result.lower()
+    assert "prueba" in result_lower or "entorno" in result_lower, (
+        f"En modo fake el mensaje debe aclarar que es un entorno de prueba. Got: {result!r}"
+    )
+    assert "envié tu solicitud de visita al agente inmobiliario" not in result_lower, (
+        f"En modo fake no debe afirmar que se notificó a un agente real. Got: {result!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_request_visit_email_mode_confirms_send(monkeypatch):
+    """En modo email con envío exitoso, el mensaje confirma que se notificó al agente."""
+    monkeypatch.setenv("NOTIFICATIONS_MODE", "email")
+
+    # Parcheamos send_manual_visit_request para que no haga red real.
+    import agent.notifications as notif_mod
+    async def _fake_send(appointment_id, client_id, description, dt):
+        return True
+    monkeypatch.setattr(notif_mod, "send_manual_visit_request", _fake_send)
+
+    result = await request_visit.ainvoke({
+        "client_id": "client_test",
+        "property_description": "Casa en Envigado",
+        "preferred_datetime": "este viernes",
+    })
+    assert "envié tu solicitud" in result.lower() or "agente inmobiliario" in result.lower(), (
+        f"En modo email exitoso debe confirmar el envío. Got: {result!r}"
+    )
