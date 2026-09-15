@@ -15,6 +15,9 @@ import logging
 import os
 import sys
 
+from dotenv import load_dotenv
+load_dotenv()
+
 # Hace importable el paquete agent desde apps/agent/src sin tocar run.ps1
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "apps", "agent", "src"))
 
