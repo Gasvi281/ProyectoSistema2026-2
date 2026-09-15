@@ -59,7 +59,7 @@ class HttpListingAgencyResolver(ListingAgencyResolverPort):
 
         url = f"{self.base_url}/listings/{listing_id}"
         headers = await get_auth_headers(self.caller_agency_id)
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.get(url, headers=headers)
 
         if resp.status_code in (404, 422):

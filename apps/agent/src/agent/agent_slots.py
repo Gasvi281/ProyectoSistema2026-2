@@ -43,7 +43,7 @@ class HttpAgentSlots(AgentSlotsPort):
         url = f"{self.base_url}/agents/{agent_id}/slots"
         headers = await get_auth_headers(agency_id)
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.get(
                 url,
                 params={"from": date_from, "to": date_to},

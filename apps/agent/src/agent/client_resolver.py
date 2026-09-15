@@ -85,7 +85,7 @@ class HttpClientResolver(ClientResolverPort):
             # no-numérico indica un bug aguas arriba, no un caso a tolerar acá.
             "telegram_user_id": int(chat_id),
         }
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(url, json=body, headers=headers)
             resp.raise_for_status()  # 200 y 201 no lanzan → ambos son éxito (dedup)
             return resp.json()["id"]

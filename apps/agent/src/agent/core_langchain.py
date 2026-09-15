@@ -139,8 +139,24 @@ class ConversationalAgent:
                 config = {"configurable": {"thread_id": chat_id}}
                 # Resolver el client_id real de backend (distinto del chat_id)
                 # para que tools como create_or_get_lead reciban el id correcto.
-                # FakeClientResolver es determinista y nunca lanza.
-                client_id = await self.client_resolver.resolve_client(chat_id)
+                # FakeClientResolver es determinista y nunca lanza; HttpClientResolver
+                # puede fallar por cold-start (ReadTimeout) — en ese caso devolvemos
+                # un mensaje amable en vez de propagar al catch-all de "Error: ".
+                try:
+                    client_id = await self.client_resolver.resolve_client(chat_id)
+                except Exception:
+                    reply_text = (
+                        "Hubo un problema conectando con el servidor, "
+                        "intenta de nuevo en un momento."
+                    )
+                    return AgentReply(
+                        reply_text=reply_text,
+                        metadata={
+                            "chat_id": chat_id,
+                            "channel": channel,
+                            "timestamp": datetime.now().isoformat(),
+                        },
+                    )
                 contextual_message = (
                     f"[client_id de esta conversación: {client_id}] {message}"
                 )

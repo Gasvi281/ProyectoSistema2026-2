@@ -34,7 +34,7 @@ class HttpAppointmentBooking(AppointmentBookingPort):
         url = f"{self.base_url}/leads/{lead_id}/appointments"
         headers = {"Content-Type": "application/json", **(await get_auth_headers(agency_id))}
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(
                 url,
                 json={"scheduled_at": scheduled_at, "duration_min": duration_min},

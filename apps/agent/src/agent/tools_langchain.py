@@ -299,5 +299,20 @@ async def book_appointment(lead_id, scheduled_at, duration_min=60):
 
 
 def get_tools():
-    """Get all tools."""
-    return [search_properties, answer_property_question, check_availability, schedule_meeting, save_liked_property, request_visit, create_or_get_lead, check_agent_availability, book_appointment]
+    """Retorna los tools activos del agente.
+
+    check_availability y schedule_meeting son la generación anterior (fake hardcodeado,
+    sin endpoint http real). Fueron retirados en Sprint 3 para que el LLM use
+    exclusivamente la ruta http real de HU-22:
+      create_or_get_lead → check_agent_availability → book_appointment
+    Las definiciones de función se mantienen como código muerto (deuda de limpieza).
+    """
+    return [
+        search_properties,
+        answer_property_question,
+        save_liked_property,
+        request_visit,
+        create_or_get_lead,
+        check_agent_availability,
+        book_appointment,
+    ]
