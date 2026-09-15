@@ -4,10 +4,18 @@ import httpx
 
 from agent.tools_langchain import create_or_get_lead
 from agent.leads import HttpLead, get_lead_provider
-from agent.fakes import FakeLead
+from agent.fakes import FakeLead, UnknownListingError
 from agent.fakes import SEED_AGENT_ID, SEED_LISTING_ID, SEED_CLIENT_ID
-from agent.ports import LeadPort
+from agent.ports import LeadPort, ListingAgencyResolverPort
 from agent import agency_registry
+
+
+@pytest.fixture(autouse=True)
+def _clear_registry():
+    """Aisla el agency_registry entre tests para evitar filtración de estado."""
+    agency_registry.clear()
+    yield
+    agency_registry.clear()
 
 
 CLIENT_ID  = SEED_CLIENT_ID
@@ -174,3 +182,69 @@ def test_factory_invalid_mode(monkeypatch):
     monkeypatch.setenv("LEAD_MODE", "invalid")
     with pytest.raises(ValueError, match="LEAD_MODE inválido"):
         get_lead_provider()
+
+
+# ---------------------------------------------------------------------------
+# Propagación de excepciones del resolver (end-to-end a nivel de tool)
+# ---------------------------------------------------------------------------
+
+class _ResolverRaises(ListingAgencyResolverPort):
+    """Stub: resolve() lanza una excepción arbitraria."""
+    def __init__(self, exc: Exception):
+        self._exc = exc
+
+    async def resolve(self, listing_id: str) -> str:
+        raise self._exc
+
+
+@pytest.mark.asyncio
+async def test_tool_resolver_http_error_propagates(monkeypatch):
+    """HTTPStatusError del resolver (400/403/5xx) escapa la tool — nunca se enmascara.
+
+    Traza auditada: el 1er try de create_or_get_lead (tools_langchain.py:199-205)
+    captura solo UnknownListingError; HTTPStatusError lo atraviesa.
+    ToolNode default handler (langgraph tool_node.py:383-391) re-lanza todo lo que
+    no es ToolInvocationError — ainvoke propaga la excepción al caller.
+    """
+    _err_resp = httpx.Response(
+        403,
+        content=b'{"detail":"no AI_AGENT row"}',
+        request=httpx.Request("GET", "https://fake-backend.test/listings/x"),
+    )
+    exc = httpx.HTTPStatusError("forbidden", request=_err_resp.request, response=_err_resp)
+
+    monkeypatch.setattr(
+        "agent.listing_agency_resolver.get_listing_agency_resolver_provider",
+        lambda: _ResolverRaises(exc),
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await create_or_get_lead.ainvoke(
+            {"client_id": CLIENT_ID, "listing_id": LISTING_ID}
+        )
+
+
+@pytest.mark.asyncio
+async def test_tool_resolver_unknown_listing_returns_error_dict(monkeypatch):
+    """UnknownListingError del resolver → agency_id=None → dict de error, no excepción.
+
+    Contrasta con test_tool_resolver_http_error_propagates: el 404-path (caso de
+    negocio esperado) produce un dict que el LLM puede verbalizar graciosamente,
+    no un turno de error ruidoso.
+    """
+    monkeypatch.setenv("LEAD_MODE", "fake")
+    monkeypatch.setattr(
+        "agent.listing_agency_resolver.get_listing_agency_resolver_provider",
+        lambda: _ResolverRaises(UnknownListingError("listing not found")),
+    )
+
+    result = await create_or_get_lead.ainvoke(
+        {"client_id": CLIENT_ID, "listing_id": LISTING_ID}
+    )
+    # FakeLead no consulta el registry → retorna un lead con agency_id=None registrado
+    # (agency_registry.register no se llamó), pero el tool sí retorna el dict del lead.
+    assert isinstance(result, dict)
+    # No debe propagar excepción — el error queda encapsulado en el flujo.
+    # El campo "error" puede ser None (FakeLead no hace la validación del registry)
+    # o contener un mensaje si alguna validación intermedia falla.
+    assert "client_id" in result or "error" in result

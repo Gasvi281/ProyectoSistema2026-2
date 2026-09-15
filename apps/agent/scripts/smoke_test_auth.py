@@ -71,48 +71,56 @@ async def main() -> None:
         print(f"     X-Agency-Id: {headers.get('X-Agency-Id', '(ausente)')}")
 
     # ------------------------------------------------------------------ #
-    # Step 2: GET /agents/{agent_id}/slots (solo lectura)                 #
+    # Step 2: GET /agents/{agent_id}/slots — 3-way probe                  #
+    #                                                                      #
+    # Objetivo: determinar empíricamente si /slots exige X-Agency-Id y    #
+    # si valida el valor contra la agencia real del agente.               #
+    #                                                                      #
+    # Variante A: X-Agency-Id = AGENCY_ID del caller (valor del .env).    #
+    # Variante B: sin X-Agency-Id (¿es el header obligatorio?).           #
+    # Variante C: X-Agency-Id = UUID falso (¿valida el backend el valor?) #
     # ------------------------------------------------------------------ #
-    print(f"\n=== Step 2: GET /agents/{AGENT_ID}/slots ===\n")
+    print(f"\n=== Step 2: GET /agents/{AGENT_ID}/slots (3-way probe) ===\n")
     backend_url = os.getenv("BACKEND_URL", "").rstrip("/")
     date_from = "2026-09-14T00:00:00Z"
     date_to   = "2026-09-21T23:59:59Z"
-    url = f"{backend_url}/agents/{AGENT_ID}/slots"
+    slots_url = f"{backend_url}/agents/{AGENT_ID}/slots"
 
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            req = client.build_request(
-                "GET", url,
-                params={"from": date_from, "to": date_to},
-                headers=headers,
-            )
-            print(f"[request] method  : {req.method}")
-            print(f"[request] url     : {req.url}")
-            print(f"[request] headers : {list(req.headers.keys())}")
-            resp = await client.send(req)
-        print(f"\n[response] status : {resp.status_code}")
-        print(f"[response] body   : {resp.text!r}")
-        resp.raise_for_status()
-        data = resp.json()
-        slots = data.get("slots", [])
-        print(f"     agent_id    : {data.get('agent_id')}")
-        print(f"     slot_minutes: {data.get('slot_minutes')}")
-        print(f"     slots count : {len(slots)}")
-        if slots:
-            print(f"     primer slot : {slots[0]}")
-            print(f"     último slot : {slots[-1]}")
-        print("\n[OK] Llamada autenticada al backend completada.")
-    except httpx.HTTPStatusError as exc:
-        print(f"[FAIL] HTTP {exc.response.status_code} del backend")
-        print(f"       URL: {exc.request.url}")
-        try:
-            print(f"       Body: {exc.response.json()}")
-        except Exception:
-            print(f"       Body (raw): {exc.response.text[:200]}")
-    except httpx.TimeoutException as exc:
-        print(f"[FAIL] Timeout conectando al backend (cold start?): {exc}")
-    except Exception as exc:
-        print(f"[FAIL] Error inesperado ({type(exc).__name__}): {exc}")
+    # Cabeceras de auth sin X-Agency-Id (base limpia para armar variantes).
+    auth_only_headers = {k: v for k, v in headers.items() if k != "X-Agency-Id"}
+
+    probe_variants = [
+        ("A — X-Agency-Id = AGENCY_ID (caller)",     {**auth_only_headers, "X-Agency-Id": os.getenv("AGENCY_ID", "")}),
+        ("B — sin X-Agency-Id",                       auth_only_headers),
+        ("C — X-Agency-Id = UUID falso",              {**auth_only_headers, "X-Agency-Id": "00000000-0000-0000-0000-000000000000"}),
+    ]
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        for label, probe_headers in probe_variants:
+            print(f"--- Variante {label} ---")
+            print(f"[request] headers enviados : {list(probe_headers.keys())}")
+            agency_sent = probe_headers.get("X-Agency-Id", "(ausente)")
+            print(f"[request] X-Agency-Id      : {agency_sent}")
+            try:
+                resp = await client.get(
+                    slots_url,
+                    params={"from": date_from, "to": date_to},
+                    headers=probe_headers,
+                )
+                print(f"[response] status : {resp.status_code}")
+                print(f"[response] body   : {resp.text!r}")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    slots = data.get("slots", [])
+                    print(f"     slot_minutes: {data.get('slot_minutes')}")
+                    print(f"     slots count : {len(slots)}")
+                    if slots:
+                        print(f"     primer slot : {slots[0]}")
+            except httpx.TimeoutException as exc:
+                print(f"[FAIL] Timeout (cold start?): {exc}")
+            except Exception as exc:
+                print(f"[FAIL] Error inesperado ({type(exc).__name__}): {exc}")
+            print()
 
 
 asyncio.run(main())

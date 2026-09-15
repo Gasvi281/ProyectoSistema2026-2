@@ -2,26 +2,77 @@
 listing_agency_resolver.py
 --------------------------
 Factory que selecciona la implementación de ListingAgencyResolverPort.
-Mismo patrón que client_resolver.py: modo "fake" (por defecto) o "http"
-(stub — no implementado aún; el backend no expone listing → agency_id).
+Mismo patrón que client_resolver.py: modo "fake" (por defecto) o "http".
 
-El fake arranca sin mappings (FakeListingAgencyResolver({})). Mientras no
-existan datos reales de listing_id → agency_id, todo intento de crear un
-lead lanzará UnregisteredEntityError — eso es correcto y esperado, no un
-bug a solucionar con seed data inventada.
-Agregar mappings reales aquí cuando el catálogo del backend esté conectado.
+Semántica del modo "http" (HttpListingAgencyResolver):
+  El backend NO expone agency_id en el body de GET /listings/{id}
+  (verificado en probe de 4 variantes contra el backend desplegado,
+  2026-09-14). El endpoint sí exige X-Agency-Id del caller; una agencia
+  sin fila AI_AGENT recibe 403.
+  Por tanto el resolver actúa como existence-check:
+    - 200  → el listing existe y es accesible bajo la agencia del bot
+             → devuelve caller_agency_id (env AGENCY_ID)
+    - 404  → listing inexistente o inaccesible → UnknownListingError (fail-loud)
+    - resto → raise_for_status() → HTTPStatusError (auth/config/infra, no
+              enmascarar como "no encontré el listing")
+  El agency_id del caller (env AGENCY_ID) y el del listing coinciden
+  necesariamente para este bot — verificado, no asumido (el bot tiene
+  exactamente una fila AI_AGENT).
 """
 
 import os
 
+import httpx
+
 from agent.ports import ListingAgencyResolverPort
+from agent.backend_auth import check_backend_config, get_auth_headers
+
+
+class HttpListingAgencyResolver(ListingAgencyResolverPort):
+    """Valida que listing_id sea accesible bajo la agencia del bot vía GET /listings/{id}.
+
+    Requiere que AGENCY_ID esté seteado (identidad del caller ante el backend).
+    Lanza UnknownListingError en 404. Propaga HTTPStatusError en cualquier otro
+    error HTTP (nunca lo transforma en UnknownListingError).
+    """
+
+    def __init__(self):
+        check_backend_config()
+        # Fail-loud: AGENCY_ID identifica al caller ante el backend.
+        # Si falta, GET /listings devolvería 400 confuso a mitad de conversación.
+        # Preferimos fallar al construir el resolver (una vez), no por request.
+        self.caller_agency_id = os.getenv("AGENCY_ID")
+        if not self.caller_agency_id:
+            raise ValueError(
+                "AGENCY_ID no está seteado — requerido para identificar al caller "
+                "ante el backend (X-Agency-Id en GET /listings/{id})."
+            )
+        self.base_url = os.getenv("BACKEND_URL", "").rstrip("/")
+
+    async def resolve(self, listing_id: str) -> str:
+        from agent.fakes import UnknownListingError
+
+        url = f"{self.base_url}/listings/{listing_id}"
+        headers = await get_auth_headers(self.caller_agency_id)
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url, headers=headers)
+
+        if resp.status_code == 404:
+            raise UnknownListingError(
+                f"listing_id {listing_id!r} no existe o no es accesible "
+                f"bajo la agencia {self.caller_agency_id!r}"
+            )
+        resp.raise_for_status()  # 400/403/5xx → HTTPStatusError (fail-loud)
+        # El backend no expone agency_id del listing — ver docstring del módulo.
+        return self.caller_agency_id
 
 
 def get_listing_agency_resolver_provider() -> ListingAgencyResolverPort:
     """
     Elige la implementación según LISTING_AGENCY_RESOLVER_MODE:
     "fake" (por defecto) → FakeListingAgencyResolver vacío (sin mappings aún)
-    "http"               → NotImplementedError (pendiente de soporte en backend)
+    "http"               → HttpListingAgencyResolver (GET /listings/{id} como
+                           existence-check; devuelve caller AGENCY_ID)
     """
     mode = os.getenv("LISTING_AGENCY_RESOLVER_MODE", "fake").lower()
 
@@ -29,9 +80,6 @@ def get_listing_agency_resolver_provider() -> ListingAgencyResolverPort:
         from agent.fakes import FakeListingAgencyResolver
         return FakeListingAgencyResolver()
     elif mode == "http":
-        raise NotImplementedError(
-            "HttpListingAgencyResolver no está disponible: el backend no expone "
-            "agency_id en /listings todavía. Usa LISTING_AGENCY_RESOLVER_MODE=fake."
-        )
+        return HttpListingAgencyResolver()
     else:
         raise ValueError(f"LISTING_AGENCY_RESOLVER_MODE inválido: {mode!r}")
