@@ -214,6 +214,26 @@ async def create_or_get_lead(client_id, listing_id):
         # Listing no mapeado a ninguna agencia conocida: HttpLead lanzará
         # UnregisteredEntityError — el tool retorna error al LLM.
         agency_id = None
+    except httpx.HTTPStatusError as e:
+        # 403/5xx del resolver (auth, infra) — devolvemos dict de error para
+        # no dejar escapar la excepción al grafo (evita envenenamiento de
+        # MemorySaver). El LLM recibe el error y puede informar al usuario.
+        code = e.response.status_code
+        return {
+            "client_id": client_id,
+            "listing_id": listing_id,
+            "error": f"Error del servidor ({code}) al validar el listing.",
+            "error_code": code,
+        }
+    except Exception as e:
+        # Cualquier otro fallo del resolver (ej. ReadTimeout por cold-start)
+        # no debe propagar fuera del tool — misma razón que el caso anterior.
+        return {
+            "client_id": client_id,
+            "listing_id": listing_id,
+            "error": str(e),
+            "error_code": None,
+        }
 
     provider = get_lead_provider()
     try:

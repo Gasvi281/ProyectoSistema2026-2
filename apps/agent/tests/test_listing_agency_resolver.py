@@ -145,6 +145,26 @@ async def test_http_404_raises_unknown_listing_error(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# (3b) 422 → UnknownListingError (UUID malformado del path — misma semántica que 404)
+# ---------------------------------------------------------------------------
+
+async def test_http_422_raises_unknown_listing_error(monkeypatch):
+    """Respuesta 422 (UUID inválido en el path) → UnknownListingError, igual que 404.
+    GET /listings/{id} no tiene body; un 422 solo puede venir del path param.
+    """
+    _set_valid_env(monkeypatch)
+
+    async def mock_get(self, url, *, headers=None, **kw):
+        return _make_error_response(422)
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
+
+    resolver = HttpListingAgencyResolver()
+    with pytest.raises(UnknownListingError):
+        await resolver.resolve("prop_001")  # ID no-UUID que dispararía 422 real
+
+
+# ---------------------------------------------------------------------------
 # (4) 403 → propaga HTTPStatusError (no se traga; no se convierte en None)
 # ---------------------------------------------------------------------------
 

@@ -3,6 +3,7 @@ import pytest
 from agent.fakes import FakeCatalog, FakeAvailability, FakeBooking
 from agent.types import SearchFilters
 from datetime import datetime
+from langchain_core.messages import AIMessage, ToolMessage
 from agent.tools_langchain import request_visit
 
 @pytest.mark.asyncio
@@ -77,6 +78,67 @@ async def test_request_visit_fake_mode_does_not_claim_human_notified(monkeypatch
     )
     assert "envié tu solicitud de visita al agente inmobiliario" not in result_lower, (
         f"En modo fake no debe afirmar que se notificó a un agente real. Got: {result!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Capa C — ToolNode con handle_tool_errors no envenena el estado
+# ---------------------------------------------------------------------------
+
+def test_tool_error_handler_formats_message():
+    """_tool_error_to_message convierte una excepción en texto orientativo para el LLM.
+
+    Verifica la Capa C de Task C: el handler usado en ToolNode(handle_tool_errors=...)
+    produce un mensaje que incluye el texto del error y la instrucción de informar
+    al usuario. Es una función pura — testeable sin LangGraph ni LLM.
+    """
+    from agent.core_langchain import _tool_error_to_message
+
+    exc = RuntimeError("fallo simulado de red")
+    msg = _tool_error_to_message(exc)
+
+    assert "fallo simulado de red" in msg
+    assert "error técnico" in msg
+    assert "Informa al usuario" in msg
+
+
+def test_get_executor_uses_tool_node(monkeypatch):
+    """_get_executor() construye el grafo con un ToolNode (no pasa la lista raw).
+
+    Verifica que la Capa C está realmente cableada: ToolNode se importa y se pasa
+    a create_react_agent. Mockea create_react_agent para capturar el arg 'tools'
+    y verificar que es una instancia de ToolNode, sin LLM ni MemorySaver real.
+    """
+    from langgraph.prebuilt import ToolNode
+    from agent.core_langchain import ConversationalAgent
+
+    monkeypatch.setenv("AGENT_LLM_MODE", "fake")
+
+    captured = {}
+
+    def fake_create_react_agent(llm, tools, **kwargs):
+        captured["tools_arg"] = tools
+
+        class _FakeGraph:
+            async def ainvoke(self, *a, **kw):
+                return {"messages": [type("M", (), {"content": "ok"})()]}
+
+        return _FakeGraph()
+
+    # La importación es local dentro de _get_executor(); parchear en el módulo origen.
+    monkeypatch.setattr(
+        "langgraph.prebuilt.create_react_agent",
+        fake_create_react_agent,
+    )
+
+    agent = ConversationalAgent()
+    # Forzar reset del executor cacheado
+    agent._executor = None
+    agent._get_executor()
+
+    assert "tools_arg" in captured, "_get_executor() no llamó a create_react_agent"
+    assert isinstance(captured["tools_arg"], ToolNode), (
+        f"Se esperaba ToolNode como arg 'tools', se obtuvo {type(captured['tools_arg'])}"
     )
 
 

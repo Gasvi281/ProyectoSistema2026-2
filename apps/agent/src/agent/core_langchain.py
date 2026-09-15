@@ -13,6 +13,19 @@ from agent.fakes import FakeConversationStore
 from agent.client_resolver import get_client_resolver_provider
 
 
+def _tool_error_to_message(e: Exception) -> str:
+    """Convierte una excepción escapada de un tool en un mensaje de texto para el LLM.
+
+    Usado como handler en ToolNode para garantizar que ninguna excepción
+    inesperada de un tool deje el thread de MemorySaver en estado inconsistente
+    (AIMessage con tool_calls sin ToolMessage que lo resuelva).
+    """
+    return (
+        f"La herramienta falló con un error técnico: {e}. "
+        "Informa al usuario que hubo un problema y que puede intentar de nuevo."
+    )
+
+
 class ConversationalAgent:
     """Agente ReAct usando LangGraph (LangChain 1.x)."""
 
@@ -34,14 +47,23 @@ class ConversationalAgent:
         return "Eres un asistente inmobiliario para Medellín. Ayuda a encontrar propiedades y agendar visitas."
 
     def _get_executor(self):
-        """Crea el grafo LangGraph la primera vez (modo gemini)."""
+        """Crea el grafo LangGraph la primera vez (modo gemini).
+
+        Usamos un ToolNode explícito con handle_tool_errors para garantizar que
+        ningún tool que lance una excepción inesperada deje el thread_id de
+        MemorySaver en estado inconsistente (AIMessage con tool_calls sin
+        ToolMessage de respuesta). Con este handler cualquier excepción no
+        capturada dentro de un tool se convierte en un ToolMessage de error, el
+        LLM recibe ese mensaje y puede responder al usuario con gracia.
+        """
         if self._executor is None:
-            from langgraph.prebuilt import create_react_agent
+            from langgraph.prebuilt import create_react_agent, ToolNode
             from langgraph.checkpoint.memory import MemorySaver
 
+            tool_node = ToolNode(self.tools, handle_tool_errors=_tool_error_to_message)
             self._executor = create_react_agent(
                 self.llm,
-                self.tools,
+                tool_node,
                 prompt=self.system_prompt,
                 checkpointer=MemorySaver(),
             )

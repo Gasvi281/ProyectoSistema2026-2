@@ -198,13 +198,13 @@ class _ResolverRaises(ListingAgencyResolverPort):
 
 
 @pytest.mark.asyncio
-async def test_tool_resolver_http_error_propagates(monkeypatch):
-    """HTTPStatusError del resolver (400/403/5xx) escapa la tool — nunca se enmascara.
+async def test_tool_resolver_http_status_error_returns_dict(monkeypatch):
+    """HTTPStatusError del resolver (403/5xx) → el tool devuelve dict de error, no propaga.
 
-    Traza auditada: el 1er try de create_or_get_lead (tools_langchain.py:199-205)
-    captura solo UnknownListingError; HTTPStatusError lo atraviesa.
-    ToolNode default handler (langgraph tool_node.py:383-391) re-lanza todo lo que
-    no es ToolInvocationError — ainvoke propaga la excepción al caller.
+    Con la Capa A (Task C), el try/except del resolver en create_or_get_lead
+    ahora atrapa httpx.HTTPStatusError y devuelve un dict con error_code — igual
+    que el bloque de leads y book_appointment. El thread de MemorySaver queda
+    consistente porque ninguna excepción escapa al grafo.
     """
     _err_resp = httpx.Response(
         403,
@@ -218,10 +218,33 @@ async def test_tool_resolver_http_error_propagates(monkeypatch):
         lambda: _ResolverRaises(exc),
     )
 
-    with pytest.raises(httpx.HTTPStatusError):
-        await create_or_get_lead.ainvoke(
-            {"client_id": CLIENT_ID, "listing_id": LISTING_ID}
-        )
+    result = await create_or_get_lead.ainvoke(
+        {"client_id": CLIENT_ID, "listing_id": LISTING_ID}
+    )
+    assert isinstance(result, dict)
+    assert result["error_code"] == 403
+    assert "error" in result and result["error"]
+
+
+@pytest.mark.asyncio
+async def test_tool_resolver_read_timeout_returns_dict(monkeypatch):
+    """ReadTimeout del resolver (ej. cold-start de Render) → dict de error, no propaga.
+
+    Caso concreto documentado en CLAUDE.md: el resolver se ejecuta antes de POST /leads;
+    un cold-start de 30-50 s dispara ReadTimeout. Con la Capa A ese timeout ahora
+    devuelve un dict en vez de envenenar el thread de MemorySaver.
+    """
+    monkeypatch.setattr(
+        "agent.listing_agency_resolver.get_listing_agency_resolver_provider",
+        lambda: _ResolverRaises(httpx.ReadTimeout("timed out")),
+    )
+
+    result = await create_or_get_lead.ainvoke(
+        {"client_id": CLIENT_ID, "listing_id": LISTING_ID}
+    )
+    assert isinstance(result, dict)
+    assert result["error_code"] is None
+    assert "timed out" in result["error"]
 
 
 @pytest.mark.asyncio

@@ -10,11 +10,16 @@ Semántica del modo "http" (HttpListingAgencyResolver):
   2026-09-14). El endpoint sí exige X-Agency-Id del caller; una agencia
   sin fila AI_AGENT recibe 403.
   Por tanto el resolver actúa como existence-check:
-    - 200  → el listing existe y es accesible bajo la agencia del bot
-             → devuelve caller_agency_id (env AGENCY_ID)
-    - 404  → listing inexistente o inaccesible → UnknownListingError (fail-loud)
-    - resto → raise_for_status() → HTTPStatusError (auth/config/infra, no
-              enmascarar como "no encontré el listing")
+    - 200     → el listing existe y es accesible bajo la agencia del bot
+               → devuelve caller_agency_id (env AGENCY_ID)
+    - 404/422 → listing inexistente, inaccesible, o listing_id no es un UUID
+               válido → UnknownListingError (fail-loud).
+               Nota sobre 422: GET /listings/{id} no tiene body ni query params;
+               el único motivo de 422 es que el path param no pase la validación
+               de UUID de FastAPI. Funcionalmente equivale a "no existe" — no
+               puede enmascarar otro tipo de error de validación.
+    - resto   → raise_for_status() → HTTPStatusError (auth/config/infra, no
+               enmascarar como "no encontré el listing")
   El agency_id del caller (env AGENCY_ID) y el del listing coinciden
   necesariamente para este bot — verificado, no asumido (el bot tiene
   exactamente una fila AI_AGENT).
@@ -57,10 +62,10 @@ class HttpListingAgencyResolver(ListingAgencyResolverPort):
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(url, headers=headers)
 
-        if resp.status_code == 404:
+        if resp.status_code in (404, 422):
             raise UnknownListingError(
-                f"listing_id {listing_id!r} no existe o no es accesible "
-                f"bajo la agencia {self.caller_agency_id!r}"
+                f"listing_id {listing_id!r} no existe, es inaccesible bajo la agencia "
+                f"{self.caller_agency_id!r}, o no es un UUID válido"
             )
         resp.raise_for_status()  # 400/403/5xx → HTTPStatusError (fail-loud)
         # El backend no expone agency_id del listing — ver docstring del módulo.
