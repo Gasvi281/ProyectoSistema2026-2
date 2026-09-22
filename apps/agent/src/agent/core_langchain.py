@@ -13,6 +13,7 @@ from agent.llm import get_langchain_llm
 from agent.tools_langchain import get_tools
 from agent.fakes import FakeConversationStore
 from agent.client_resolver import get_client_resolver_provider
+from agent.observability import get_langfuse_callbacks
 
 logger = logging.getLogger("agent.steps")
 
@@ -160,6 +161,17 @@ class ConversationalAgent:
                 contextual_message = (
                     f"[client_id de esta conversación: {client_id}] {message}"
                 )
+                # Tracing opcional: agrega callbacks de Langfuse si las keys están
+                # configuradas. No toca configurable.thread_id (historial de MemorySaver).
+                callbacks = get_langfuse_callbacks()
+                if callbacks:
+                    config["callbacks"] = callbacks
+                    config["metadata"] = {
+                        **config.get("metadata", {}),
+                        "langfuse_session_id": chat_id,
+                        "langfuse_user_id": client_id,
+                        "channel": channel,
+                    }
                 result = await executor.ainvoke(
                     {"messages": [HumanMessage(content=contextual_message)]},
                     config=config,
