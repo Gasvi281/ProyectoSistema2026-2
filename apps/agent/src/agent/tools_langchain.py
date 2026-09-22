@@ -1,8 +1,11 @@
 """LangChain tools for property search, Q&A, availability, scheduling."""
+import logging
 from typing import Optional
 from pydantic import BaseModel, Field
 from langchain.tools import tool
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 class SearchInput(BaseModel):
     location: Optional[str] = Field(None, description="City or neighborhood")
@@ -40,10 +43,15 @@ class AgentAvailabilityInput(BaseModel):
     date_from: str = Field(..., description="Inicio del rango a consultar — ISO 8601 con zona horaria, ej. '2026-09-10T00:00:00+00:00'")
     date_to: str = Field(..., description="Fin del rango a consultar — ISO 8601 con zona horaria, ej. '2026-09-17T23:59:59+00:00'")
 
+class CreateLeadInput(BaseModel):
+    client_id: str = Field(..., description="Client ID — usa el que aparece al inicio del mensaje del sistema, nunca lo inventes")
+    listing_id: str = Field(..., description="ID del listing/propiedad del backend por el que el cliente muestra interés")
+
 class BookAppointmentInput(BaseModel):
     lead_id: str = Field(..., description="ID del lead/cliente — usa el que aparece al inicio del mensaje del sistema, nunca lo inventes")
     scheduled_at: str = Field(..., description="Fecha/hora del slot elegido — ISO 8601 con zona horaria, ej. '2026-09-10T09:00:00+00:00'. Debe ser un slot real obtenido de check_agent_availability, nunca inventado")
     duration_min: int = Field(60, description="Duración de la visita en minutos (default 60)")
+    agent_id: Optional[str] = Field(None, description="ID del agente inmobiliario — obtenido de create_or_get_lead; requerido para proponer alternativas si el slot no está disponible")
 
 @tool(args_schema=SearchInput)
 def search_properties(location=None, min_price=None, max_price=None, min_bedrooms=None, max_bedrooms=None, property_type=None):
@@ -156,6 +164,7 @@ async def request_visit(client_id, property_description, preferred_datetime):
     request directly to the human agent by email, based only on what the
     client described in the conversation. Do not invent a client_id — use
     the one given in the system context for this conversation."""
+    import os
     import uuid
     from agent.notifications import send_manual_visit_request
 
@@ -169,13 +178,90 @@ async def request_visit(client_id, property_description, preferred_datetime):
         print(f"[request_visit] No se pudo notificar al agente: {e}")
         return "Tuve un problema enviando tu solicitud, intenta de nuevo en un momento."
 
-    if ok:
+    if not ok:
+        return "No pude enviar la solicitud en este momento, pero tu interés quedó registrado. Intenta de nuevo más tarde."
+
+    # El aviso real solo sale cuando NOTIFICATIONS_MODE=email. En modo fake,
+    # send_manual_visit_request solo imprime en consola — no llega nada a ningún
+    # agente humano. Usamos el mismo criterio que esa función para decidir
+    # qué mensaje es honesto devolver.
+    if os.getenv("NOTIFICATIONS_MODE", "fake").lower() == "email":
         return (
             f"Listo, envié tu solicitud de visita al agente inmobiliario. "
             f"Te contactará pronto para confirmar disponibilidad. "
             f"ID de referencia: {appointment_id}"
         )
-    return "No pude enviar la solicitud en este momento, pero tu interés quedó registrado. Intenta de nuevo más tarde."
+    return (
+        f"Registré tu solicitud de visita (entorno de prueba: todavía no se "
+        f"envió un aviso real a un agente). ID de referencia: {appointment_id}"
+    )
+
+@tool(args_schema=CreateLeadInput)
+async def create_or_get_lead(client_id, listing_id):
+    """Crea u obtiene el lead del backend para este cliente y listing. Devuelve el
+    lead con su agent_id derivado (úsalo para check_agent_availability) y su id
+    (úsalo como lead_id para book_appointment). Úsala antes de agendar una visita.
+    No inventes client_id ni listing_id — usa solo valores confirmados en la conversación."""
+    import httpx
+    from agent.leads import get_lead_provider
+    from agent.listing_agency_resolver import get_listing_agency_resolver_provider
+    from agent import agency_registry
+    from agent.fakes import UnknownListingError
+
+    # Resolver listing_id → agency_id antes de llamar al backend, de modo que
+    # HttpLead pueda incluir X-Agency-Id en POST /leads.
+    resolver = get_listing_agency_resolver_provider()
+    try:
+        agency_id: str | None = await resolver.resolve(listing_id)
+        agency_registry.register(listing_id=listing_id, agency_id=agency_id)
+    except UnknownListingError:
+        # Listing no mapeado a ninguna agencia conocida: HttpLead lanzará
+        # UnregisteredEntityError — el tool retorna error al LLM.
+        agency_id = None
+    except httpx.HTTPStatusError as e:
+        # 403/5xx del resolver (auth, infra) — devolvemos dict de error para
+        # no dejar escapar la excepción al grafo (evita envenenamiento de
+        # MemorySaver). El LLM recibe el error y puede informar al usuario.
+        code = e.response.status_code
+        return {
+            "client_id": client_id,
+            "listing_id": listing_id,
+            "error": f"Error del servidor ({code}) al validar el listing.",
+            "error_code": code,
+        }
+    except Exception as e:
+        # Cualquier otro fallo del resolver (ej. ReadTimeout por cold-start)
+        # no debe propagar fuera del tool — misma razón que el caso anterior.
+        return {
+            "client_id": client_id,
+            "listing_id": listing_id,
+            "error": str(e),
+            "error_code": None,
+        }
+
+    provider = get_lead_provider()
+    try:
+        # source_channel: IN_APP como stopgap — el backend no acepta TELEGRAM (ask #1).
+        result = await provider.create_or_get_lead(client_id, listing_id, "IN_APP")
+        # Registrar también bajo lead_id y agent_id para que HttpAppointmentBooking
+        # y HttpAgentSlots puedan recuperar el agency_id por sus propios ids.
+        if agency_id is not None:
+            agency_registry.register(
+                lead_id=result["id"],
+                agent_id=result["agent_id"],
+                agency_id=agency_id,
+            )
+        return {**result, "error": None, "error_code": None}
+    except httpx.HTTPStatusError as e:
+        code = e.response.status_code
+        if code == 422:
+            msg = "client_id o listing_id inválido (no existe en el backend)."
+        else:
+            msg = f"Error del servidor ({code}) al crear el lead."
+        return {"client_id": client_id, "listing_id": listing_id, "error": msg, "error_code": code}
+    except Exception as e:
+        return {"client_id": client_id, "listing_id": listing_id, "error": str(e), "error_code": None}
+
 
 @tool(args_schema=AgentAvailabilityInput)
 async def check_agent_availability(agent_id, date_from, date_to):
@@ -191,13 +277,20 @@ async def check_agent_availability(agent_id, date_from, date_to):
 
 
 @tool(args_schema=BookAppointmentInput)
-async def book_appointment(lead_id, scheduled_at, duration_min=60):
+async def book_appointment(lead_id, scheduled_at, duration_min=60, agent_id=None):
     """Agenda una visita a una propiedad usando un slot real obtenido de check_agent_availability.
     Nunca inventes scheduled_at ni lead_id — usa solo valores confirmados en la conversación.
-    En caso de conflicto (409) sugiere al usuario consultar de nuevo check_agent_availability
-    para elegir otro horario disponible."""
+    Incluye agent_id (del resultado de create_or_get_lead) para que, en caso de conflicto,
+    el tool pueda proponer los horarios alternativos más cercanos automáticamente."""
     import httpx
     from agent.booking import get_appointment_booking_provider
+    from agent.booking_recovery import (
+        classify_appointment_error,
+        nearest_slots,
+        format_alternatives,
+        alternatives_window,
+        UNAVAILABLE, TAKEN, TOO_SOON, OPEN_VISIT, CLOSED_LEAD, UNKNOWN,
+    )
 
     provider = get_appointment_booking_provider()
     try:
@@ -205,17 +298,117 @@ async def book_appointment(lead_id, scheduled_at, duration_min=60):
         return {**result, "error": None, "error_code": None}
     except httpx.HTTPStatusError as e:
         code = e.response.status_code
-        if code == 409:
-            msg = "Ya existe una cita en ese horario. Consulta check_agent_availability para elegir otro slot disponible."
-        elif code == 422:
-            msg = "La fecha indicada está en el pasado. Por favor elige un horario futuro."
+        # Extraer detail del cuerpo JSON; si no es JSON, usar cadena vacía.
+        try:
+            detail = e.response.json().get("detail", "")
+        except Exception:
+            detail = ""
+
+        category = classify_appointment_error(code, detail)
+
+        if category == UNKNOWN:
+            logger.warning(
+                "book_appointment: error no reconocido — status=%d detail=%r",
+                code, detail,
+            )
+            msg = "No se pudo completar el agendamiento. Por favor intenta de nuevo más tarde."
+            return {
+                "lead_id": lead_id, "scheduled_at": scheduled_at,
+                "error": msg, "error_code": code,
+                "category": category, "alternatives": [],
+            }
+
+        if category in (OPEN_VISIT, CLOSED_LEAD):
+            if category == OPEN_VISIT:
+                msg = "Este inmueble ya tiene una visita abierta en progreso. No es posible agendar otra en este momento."
+            else:
+                msg = "El lead asociado a esta solicitud está cerrado. No es posible agendar una nueva visita."
+            return {
+                "lead_id": lead_id, "scheduled_at": scheduled_at,
+                "error": msg, "error_code": code,
+                "category": category, "alternatives": [],
+            }
+
+        # Categorías con alternativas: unavailable, taken, too_soon
+        later_only = (category == TOO_SOON)
+
+        if not agent_id:
+            # Sin agent_id no podemos consultar slots — devolver mensaje seguro.
+            msg = (
+                "El horario solicitado no está disponible. "
+                "Consulta check_agent_availability para elegir un horario libre."
+            )
+            return {
+                "lead_id": lead_id, "scheduled_at": scheduled_at,
+                "error": msg, "error_code": code,
+                "category": category, "alternatives": [],
+            }
+
+        # Intentar obtener alternativas.
+        try:
+            from agent.agent_slots import get_agent_slots_provider
+            date_from, date_to = alternatives_window(scheduled_at)
+            slots_result = await get_agent_slots_provider().list_agent_slots(
+                agent_id, date_from, date_to
+            )
+            slot_starts = [s["start"] for s in slots_result.get("slots", [])]
+            nearest = nearest_slots(slot_starts, scheduled_at, limit=3, later_only=later_only)
+            alternatives = format_alternatives(nearest)
+        except Exception as fetch_err:
+            logger.warning("book_appointment: no se pudieron obtener alternativas — %s", fetch_err)
+            msg = (
+                "El horario solicitado no está disponible y no fue posible "
+                "cargar horarios alternativos. Intenta consultar check_agent_availability."
+            )
+            return {
+                "lead_id": lead_id, "scheduled_at": scheduled_at,
+                "error": msg, "error_code": code,
+                "category": category, "alternatives": [],
+            }
+
+        if alternatives:
+            slots_text = "; ".join(a["display"] for a in alternatives)
+            msg = (
+                f"El horario solicitado no está disponible. "
+                f"Estos son los horarios más cercanos disponibles: {slots_text}. "
+                f"¿Cuál prefieres?"
+            )
         else:
-            msg = f"Error del servidor ({code}) al agendar la cita."
-        return {"lead_id": lead_id, "scheduled_at": scheduled_at, "error": msg, "error_code": code}
+            msg = (
+                "El horario solicitado no está disponible y no hay horarios "
+                "alternativos en los próximos 7 días. "
+                "Consulta check_agent_availability para un rango distinto."
+            )
+
+        return {
+            "lead_id": lead_id, "scheduled_at": scheduled_at,
+            "error": msg, "error_code": code,
+            "category": category, "alternatives": alternatives,
+        }
+
     except Exception as e:
-        return {"lead_id": lead_id, "scheduled_at": scheduled_at, "error": str(e), "error_code": None}
+        return {
+            "lead_id": lead_id, "scheduled_at": scheduled_at,
+            "error": str(e), "error_code": None,
+            "category": UNKNOWN, "alternatives": [],
+        }
 
 
 def get_tools():
-    """Get all tools."""
-    return [search_properties, answer_property_question, check_availability, schedule_meeting, save_liked_property, request_visit, check_agent_availability, book_appointment]
+    """Retorna los tools activos del agente.
+
+    check_availability y schedule_meeting son la generación anterior (fake hardcodeado,
+    sin endpoint http real). Fueron retirados en Sprint 3 para que el LLM use
+    exclusivamente la ruta http real de HU-22:
+      create_or_get_lead → check_agent_availability → book_appointment
+    Las definiciones de función se mantienen como código muerto (deuda de limpieza).
+    """
+    return [
+        search_properties,
+        answer_property_question,
+        save_liked_property,
+        request_visit,
+        create_or_get_lead,
+        check_agent_availability,
+        book_appointment,
+    ]

@@ -65,3 +65,35 @@ class AppointmentBookingPort(ABC):
         Lanza httpx.HTTPStatusError en error HTTP (incluye 409 y 422).
         """
         pass
+
+class ClientResolverPort(ABC):
+    """Resuelve la identidad de canal (chat_id) a un client_id de backend."""
+    @abstractmethod
+    async def resolve_client(
+        self, chat_id: str, phone: str | None = None, full_name: str | None = None
+    ) -> str:
+        """Retorna el client_id (UUID de backend) para este chat_id.
+        phone/full_name son opcionales: aún no se decide si el bot los captura."""
+        pass
+
+class LeadPort(ABC):
+    """Puerto para crear/obtener un lead en el backend (POST /leads)."""
+    @abstractmethod
+    async def create_or_get_lead(
+        self, client_id: str, listing_id: str, source_channel: str = "IN_APP"
+    ) -> dict:
+        """Crea o recupera el lead (dedup server-side por client_id+listing_id).
+        Retorna el lead del backend, incluyendo el agent_id derivado:
+        {"id", "client_id", "listing_id", "agent_id", "source_channel", "status",
+         "created_at", "updated_at"}.
+        Lanza httpx.HTTPStatusError en error HTTP (p.ej. 422 por FK inválida)."""
+        pass
+
+class ListingAgencyResolverPort(ABC):
+    """Resuelve un listing_id al agency_id dueño (para el header X-Agency-Id)."""
+    @abstractmethod
+    async def resolve(self, listing_id: str) -> str:
+        """Retorna el agency_id (UUID) dueño del listing.
+        Lanza UnknownListingError si el listing no está mapeado a ninguna
+        agencia conocida (nunca retorna None ni un default silencioso)."""
+        pass

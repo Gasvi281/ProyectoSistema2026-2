@@ -5,6 +5,7 @@ from agent.tools_langchain import check_agent_availability
 from agent.agent_slots import _iso_add_minutes, HttpAgentSlots
 from agent.fakes import FakeAgentSlots
 from agent.ports import AgentSlotsPort
+from agent import agency_registry
 
 
 DATE_FROM = "2026-09-10T00:00:00+00:00"
@@ -107,7 +108,10 @@ async def test_http_provider_parses_response(monkeypatch):
         return FakeResp()
 
     monkeypatch.setenv("BACKEND_URL", "http://localhost:8000")
+    monkeypatch.setenv("BACKEND_SERVICE_TOKEN", "test-token")
     monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
+    # El adapter requiere que el agent_id esté en el registry (Alt 3).
+    agency_registry.register(agent_id=AGENT_ID, agency_id="agency-test-x")
 
     provider = HttpAgentSlots()
     result = await provider.list_agent_slots(AGENT_ID, DATE_FROM, DATE_TO)
@@ -118,3 +122,31 @@ async def test_http_provider_parses_response(monkeypatch):
     assert result["slots"][0]["start"] == "2026-09-10T14:00:00Z"
     expected_end = _iso_add_minutes("2026-09-10T14:00:00Z", 30)
     assert result["slots"][0]["end"] == expected_end
+
+
+# --- guard de configuración del backend ---
+
+def test_http_provider_raises_if_no_backend_url(monkeypatch):
+    """HttpAgentSlots falla en construcción si falta BACKEND_URL."""
+    monkeypatch.delenv("BACKEND_URL", raising=False)
+    monkeypatch.setenv("BACKEND_SERVICE_TOKEN", "tok")
+    with pytest.raises(ValueError, match="BACKEND_URL"):
+        HttpAgentSlots()
+
+
+def test_http_provider_raises_if_no_auth(monkeypatch):
+    """HttpAgentSlots falla en construcción si ningún mecanismo de auth está configurado."""
+    monkeypatch.setenv("BACKEND_URL", "http://localhost:8000")
+    monkeypatch.delenv("BACKEND_SERVICE_TOKEN", raising=False)
+    monkeypatch.delenv("DEV_AGENT_ID", raising=False)
+    with pytest.raises(ValueError, match="BACKEND_SERVICE_TOKEN"):
+        HttpAgentSlots()
+
+
+def test_http_provider_accepts_dev_agent_id(monkeypatch):
+    """HttpAgentSlots acepta DEV_AGENT_ID como alternativa al bearer token."""
+    monkeypatch.setenv("BACKEND_URL", "http://localhost:8000")
+    monkeypatch.delenv("BACKEND_SERVICE_TOKEN", raising=False)
+    monkeypatch.setenv("DEV_AGENT_ID", "dev-agent-123")
+    provider = HttpAgentSlots()  # no debe lanzar
+    assert provider.base_url == "http://localhost:8000"

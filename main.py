@@ -11,11 +11,22 @@ Conecta los otros dos módulos:
 config.py se importa indirectamente a través de esos dos módulos.
 """
 
+import logging
 import os
 import sys
 
+from dotenv import load_dotenv
+load_dotenv()
+
 # Hace importable el paquete agent desde apps/agent/src sin tocar run.ps1
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "apps", "agent", "src"))
+
+if os.getenv("AGENT_DEBUG", "").lower() in ("1", "true", "yes"):
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(message)s"))
+    _steps_logger = logging.getLogger("agent.steps")
+    _steps_logger.setLevel(logging.DEBUG)
+    _steps_logger.addHandler(_handler)
 
 from fastapi import FastAPI, Request, Header, HTTPException, BackgroundTasks
 
@@ -82,7 +93,7 @@ async def handle_message(chat_id: int, user_text: str) -> None:
         history = chat_history.get_history(chat_id)
         try:
             agent_reply = await handle_turn(
-                client_id=str(chat_id),
+                chat_id=str(chat_id),
                 channel="telegram",
                 message=user_text,
             )
