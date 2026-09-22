@@ -1,8 +1,11 @@
 """LangChain tools for property search, Q&A, availability, scheduling."""
+import logging
 from typing import Optional
 from pydantic import BaseModel, Field
 from langchain.tools import tool
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 class SearchInput(BaseModel):
     location: Optional[str] = Field(None, description="City or neighborhood")
@@ -48,6 +51,7 @@ class BookAppointmentInput(BaseModel):
     lead_id: str = Field(..., description="ID del lead/cliente — usa el que aparece al inicio del mensaje del sistema, nunca lo inventes")
     scheduled_at: str = Field(..., description="Fecha/hora del slot elegido — ISO 8601 con zona horaria, ej. '2026-09-10T09:00:00+00:00'. Debe ser un slot real obtenido de check_agent_availability, nunca inventado")
     duration_min: int = Field(60, description="Duración de la visita en minutos (default 60)")
+    agent_id: Optional[str] = Field(None, description="ID del agente inmobiliario — obtenido de create_or_get_lead; requerido para proponer alternativas si el slot no está disponible")
 
 @tool(args_schema=SearchInput)
 def search_properties(location=None, min_price=None, max_price=None, min_bedrooms=None, max_bedrooms=None, property_type=None):
@@ -273,13 +277,20 @@ async def check_agent_availability(agent_id, date_from, date_to):
 
 
 @tool(args_schema=BookAppointmentInput)
-async def book_appointment(lead_id, scheduled_at, duration_min=60):
+async def book_appointment(lead_id, scheduled_at, duration_min=60, agent_id=None):
     """Agenda una visita a una propiedad usando un slot real obtenido de check_agent_availability.
     Nunca inventes scheduled_at ni lead_id — usa solo valores confirmados en la conversación.
-    En caso de conflicto (409) sugiere al usuario consultar de nuevo check_agent_availability
-    para elegir otro horario disponible."""
+    Incluye agent_id (del resultado de create_or_get_lead) para que, en caso de conflicto,
+    el tool pueda proponer los horarios alternativos más cercanos automáticamente."""
     import httpx
     from agent.booking import get_appointment_booking_provider
+    from agent.booking_recovery import (
+        classify_appointment_error,
+        nearest_slots,
+        format_alternatives,
+        alternatives_window,
+        UNAVAILABLE, TAKEN, TOO_SOON, OPEN_VISIT, CLOSED_LEAD, UNKNOWN,
+    )
 
     provider = get_appointment_booking_provider()
     try:
@@ -287,15 +298,100 @@ async def book_appointment(lead_id, scheduled_at, duration_min=60):
         return {**result, "error": None, "error_code": None}
     except httpx.HTTPStatusError as e:
         code = e.response.status_code
-        if code == 409:
-            msg = "Ya existe una cita en ese horario. Consulta check_agent_availability para elegir otro slot disponible."
-        elif code == 422:
-            msg = "La fecha indicada está en el pasado. Por favor elige un horario futuro."
+        # Extraer detail del cuerpo JSON; si no es JSON, usar cadena vacía.
+        try:
+            detail = e.response.json().get("detail", "")
+        except Exception:
+            detail = ""
+
+        category = classify_appointment_error(code, detail)
+
+        if category == UNKNOWN:
+            logger.warning(
+                "book_appointment: error no reconocido — status=%d detail=%r",
+                code, detail,
+            )
+            msg = "No se pudo completar el agendamiento. Por favor intenta de nuevo más tarde."
+            return {
+                "lead_id": lead_id, "scheduled_at": scheduled_at,
+                "error": msg, "error_code": code,
+                "category": category, "alternatives": [],
+            }
+
+        if category in (OPEN_VISIT, CLOSED_LEAD):
+            if category == OPEN_VISIT:
+                msg = "Este inmueble ya tiene una visita abierta en progreso. No es posible agendar otra en este momento."
+            else:
+                msg = "El lead asociado a esta solicitud está cerrado. No es posible agendar una nueva visita."
+            return {
+                "lead_id": lead_id, "scheduled_at": scheduled_at,
+                "error": msg, "error_code": code,
+                "category": category, "alternatives": [],
+            }
+
+        # Categorías con alternativas: unavailable, taken, too_soon
+        later_only = (category == TOO_SOON)
+
+        if not agent_id:
+            # Sin agent_id no podemos consultar slots — devolver mensaje seguro.
+            msg = (
+                "El horario solicitado no está disponible. "
+                "Consulta check_agent_availability para elegir un horario libre."
+            )
+            return {
+                "lead_id": lead_id, "scheduled_at": scheduled_at,
+                "error": msg, "error_code": code,
+                "category": category, "alternatives": [],
+            }
+
+        # Intentar obtener alternativas.
+        try:
+            from agent.agent_slots import get_agent_slots_provider
+            date_from, date_to = alternatives_window(scheduled_at)
+            slots_result = await get_agent_slots_provider().list_agent_slots(
+                agent_id, date_from, date_to
+            )
+            slot_starts = [s["start"] for s in slots_result.get("slots", [])]
+            nearest = nearest_slots(slot_starts, scheduled_at, limit=3, later_only=later_only)
+            alternatives = format_alternatives(nearest)
+        except Exception as fetch_err:
+            logger.warning("book_appointment: no se pudieron obtener alternativas — %s", fetch_err)
+            msg = (
+                "El horario solicitado no está disponible y no fue posible "
+                "cargar horarios alternativos. Intenta consultar check_agent_availability."
+            )
+            return {
+                "lead_id": lead_id, "scheduled_at": scheduled_at,
+                "error": msg, "error_code": code,
+                "category": category, "alternatives": [],
+            }
+
+        if alternatives:
+            slots_text = "; ".join(a["display"] for a in alternatives)
+            msg = (
+                f"El horario solicitado no está disponible. "
+                f"Estos son los horarios más cercanos disponibles: {slots_text}. "
+                f"¿Cuál prefieres?"
+            )
         else:
-            msg = f"Error del servidor ({code}) al agendar la cita."
-        return {"lead_id": lead_id, "scheduled_at": scheduled_at, "error": msg, "error_code": code}
+            msg = (
+                "El horario solicitado no está disponible y no hay horarios "
+                "alternativos en los próximos 7 días. "
+                "Consulta check_agent_availability para un rango distinto."
+            )
+
+        return {
+            "lead_id": lead_id, "scheduled_at": scheduled_at,
+            "error": msg, "error_code": code,
+            "category": category, "alternatives": alternatives,
+        }
+
     except Exception as e:
-        return {"lead_id": lead_id, "scheduled_at": scheduled_at, "error": str(e), "error_code": None}
+        return {
+            "lead_id": lead_id, "scheduled_at": scheduled_at,
+            "error": str(e), "error_code": None,
+            "category": UNKNOWN, "alternatives": [],
+        }
 
 
 def get_tools():
