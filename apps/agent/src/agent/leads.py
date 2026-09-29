@@ -63,3 +63,25 @@ def get_lead_provider() -> LeadPort:
         return HttpLead()
     else:
         raise ValueError(f"LEAD_MODE inválido: {mode!r}")
+
+
+def check_lead_modes() -> None:
+    """Valida que LEAD_MODE y LISTING_AGENCY_RESOLVER_MODE sean compatibles.
+
+    Debe llamarse al arrancar la app (lifespan), no dentro de un tool, para
+    fallar rápido en vez de silenciosamente en el primer turno del usuario.
+
+    Combinación inválida: LEAD_MODE=http + LISTING_AGENCY_RESOLVER_MODE=fake.
+    El resolver fake arranca vacío y no puede proveer el agency_id que HttpLead
+    necesita para X-Agency-Id en POST /leads.
+    """
+    lead_mode = os.getenv("LEAD_MODE", "fake").lower()
+    resolver_mode = os.getenv("LISTING_AGENCY_RESOLVER_MODE", "fake").lower()
+    if lead_mode == "http" and resolver_mode == "fake":
+        raise ValueError(
+            "Configuración inválida: LEAD_MODE=http requiere "
+            "LISTING_AGENCY_RESOLVER_MODE=http. "
+            "El resolver fake arranca vacío y no puede proveer el agency_id "
+            "que HttpLead necesita para X-Agency-Id. "
+            "Agrega LISTING_AGENCY_RESOLVER_MODE=http al .env."
+        )

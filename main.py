@@ -28,15 +28,30 @@ if os.getenv("AGENT_DEBUG", "").lower() in ("1", "true", "yes"):
     _steps_logger.setLevel(logging.DEBUG)
     _steps_logger.addHandler(_handler)
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request, Header, HTTPException, BackgroundTasks
 
 from config import TELEGRAM_WEBHOOK_SECRET
 from ai_service import ask_ai  # conservado intacto; ya no se usa en el flujo normal
 from telegram_service import send_message
 from agent.core_langchain import handle_turn
+from agent.observability import flush_traces
+from agent.leads import check_lead_modes
 import chat_history
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Falla rápido si la combinación de modos de provider es inválida.
+    check_lead_modes()
+    yield
+    # Vaciar trazas pendientes de Langfuse antes de que el proceso muera.
+    # Es un no-op cuando el tracing está deshabilitado.
+    flush_traces()
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 @app.get("/")
