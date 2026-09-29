@@ -61,6 +61,21 @@ def test_unregistered_id_raises():
         agency_registry.lookup("id-que-nunca-se-registró")
 
 
+def test_is_registered_true_after_register():
+    agency_registry.register(lead_id=LEAD_X, agency_id=AGENCY_X)
+    assert agency_registry.is_registered(LEAD_X) is True
+
+
+def test_is_registered_false_when_not_registered():
+    assert agency_registry.is_registered("id-fantasma") is False
+
+
+def test_is_registered_false_after_clear():
+    agency_registry.register(lead_id=LEAD_X, agency_id=AGENCY_X)
+    agency_registry.clear()
+    assert agency_registry.is_registered(LEAD_X) is False
+
+
 # ---------------------------------------------------------------------------
 # (a) Registro correcto → get_auth_headers emite X-Agency-Id
 # ---------------------------------------------------------------------------

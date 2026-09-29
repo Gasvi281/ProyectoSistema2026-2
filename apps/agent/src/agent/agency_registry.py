@@ -53,6 +53,15 @@ def lookup(entity_id: str) -> str:
         )
 
 
+def is_registered(entity_id: str) -> bool:
+    """True si entity_id fue registrado por create_or_get_lead en este proceso.
+
+    Lee el registry crudo — no aplica ningún fallback — de modo que un
+    lead_id o agent_id fabricado (nunca registrado) se detecta como ausente.
+    """
+    return entity_id in _registry
+
+
 def clear() -> None:
     """Vacía el registry. Úsalo en fixtures de tests para aislar casos."""
     _registry.clear()
