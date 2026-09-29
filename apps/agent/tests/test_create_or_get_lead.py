@@ -3,7 +3,7 @@ import pytest
 import httpx
 
 from agent.tools_langchain import create_or_get_lead
-from agent.leads import HttpLead, get_lead_provider
+from agent.leads import HttpLead, get_lead_provider, check_lead_modes
 from agent.fakes import FakeLead, UnknownListingError
 from agent.fakes import SEED_AGENT_ID, SEED_LISTING_ID, SEED_CLIENT_ID
 from agent.ports import LeadPort, ListingAgencyResolverPort
@@ -185,6 +185,39 @@ def test_factory_invalid_mode(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# check_lead_modes — startup guard
+# ---------------------------------------------------------------------------
+
+def test_check_lead_modes_raises_on_http_lead_with_fake_resolver(monkeypatch):
+    """LEAD_MODE=http + LISTING_AGENCY_RESOLVER_MODE=fake → ValueError al arrancar.
+    Previene que la combinación silenciosamente falle en el primer turno."""
+    monkeypatch.setenv("LEAD_MODE", "http")
+    monkeypatch.setenv("LISTING_AGENCY_RESOLVER_MODE", "fake")
+    with pytest.raises(ValueError, match="LISTING_AGENCY_RESOLVER_MODE=http"):
+        check_lead_modes()
+
+
+def test_check_lead_modes_ok_both_fake(monkeypatch):
+    monkeypatch.setenv("LEAD_MODE", "fake")
+    monkeypatch.setenv("LISTING_AGENCY_RESOLVER_MODE", "fake")
+    check_lead_modes()  # no debe lanzar
+
+
+def test_check_lead_modes_ok_both_http(monkeypatch):
+    monkeypatch.setenv("LEAD_MODE", "http")
+    monkeypatch.setenv("LISTING_AGENCY_RESOLVER_MODE", "http")
+    check_lead_modes()  # no debe lanzar
+
+
+def test_check_lead_modes_ok_http_resolver_fake_lead(monkeypatch):
+    """http resolver + fake lead es raro pero inofensivo — el resolver corre
+    pero FakeLead no usa el agency_id; no hay razón para bloquearlo."""
+    monkeypatch.setenv("LEAD_MODE", "fake")
+    monkeypatch.setenv("LISTING_AGENCY_RESOLVER_MODE", "http")
+    check_lead_modes()  # no debe lanzar
+
+
+# ---------------------------------------------------------------------------
 # Propagación de excepciones del resolver (end-to-end a nivel de tool)
 # ---------------------------------------------------------------------------
 
@@ -198,14 +231,10 @@ class _ResolverRaises(ListingAgencyResolverPort):
 
 
 @pytest.mark.asyncio
-async def test_tool_resolver_http_status_error_returns_dict(monkeypatch):
-    """HTTPStatusError del resolver (403/5xx) → el tool devuelve dict de error, no propaga.
-
-    Con la Capa A (Task C), el try/except del resolver en create_or_get_lead
-    ahora atrapa httpx.HTTPStatusError y devuelve un dict con error_code — igual
-    que el bloque de leads y book_appointment. El thread de MemorySaver queda
-    consistente porque ninguna excepción escapa al grafo.
-    """
+async def test_tool_resolver_403_dict_no_exception(monkeypatch):
+    """HTTPStatusError 403 del resolver → dict de error, no propaga excepción al grafo.
+    (MemorySaver queda consistente: nunca escapa una excepción del tool.)
+    Los casos BACKEND_AUTH_ERROR con aserciones de `code` están en las pruebas de Diff 4."""
     _err_resp = httpx.Response(
         403,
         content=b'{"detail":"no AI_AGENT row"}',
@@ -223,17 +252,13 @@ async def test_tool_resolver_http_status_error_returns_dict(monkeypatch):
     )
     assert isinstance(result, dict)
     assert result["error_code"] == 403
+    assert result.get("code") == "BACKEND_AUTH_ERROR"
     assert "error" in result and result["error"]
 
 
 @pytest.mark.asyncio
-async def test_tool_resolver_read_timeout_returns_dict(monkeypatch):
-    """ReadTimeout del resolver (ej. cold-start de Render) → dict de error, no propaga.
-
-    Caso concreto documentado en CLAUDE.md: el resolver se ejecuta antes de POST /leads;
-    un cold-start de 30-50 s dispara ReadTimeout. Con la Capa A ese timeout ahora
-    devuelve un dict en vez de envenenar el thread de MemorySaver.
-    """
+async def test_tool_resolver_read_timeout_returns_backend_unavailable(monkeypatch):
+    """ReadTimeout del resolver → code='BACKEND_UNAVAILABLE', error_code=None, no propaga."""
     monkeypatch.setattr(
         "agent.listing_agency_resolver.get_listing_agency_resolver_provider",
         lambda: _ResolverRaises(httpx.ReadTimeout("timed out")),
@@ -242,20 +267,17 @@ async def test_tool_resolver_read_timeout_returns_dict(monkeypatch):
     result = await create_or_get_lead.ainvoke(
         {"client_id": CLIENT_ID, "listing_id": LISTING_ID}
     )
-    assert isinstance(result, dict)
     assert result["error_code"] is None
+    assert result.get("code") == "BACKEND_UNAVAILABLE"
     assert "timed out" in result["error"]
 
 
 @pytest.mark.asyncio
-async def test_tool_resolver_unknown_listing_returns_error_dict(monkeypatch):
-    """UnknownListingError del resolver → agency_id=None → dict de error, no excepción.
+async def test_tool_resolver_unknown_listing_returns_code_unknown_listing(monkeypatch):
+    """UnknownListingError del resolver → code='UNKNOWN_LISTING', retorna sin llamar al provider.
 
-    Contrasta con test_tool_resolver_http_error_propagates: el 404-path (caso de
-    negocio esperado) produce un dict que el LLM puede verbalizar graciosamente,
-    no un turno de error ruidoso.
+    El mensaje no debe mencionar create_or_get_lead (sería circular: estamos dentro de él).
     """
-    monkeypatch.setenv("LEAD_MODE", "fake")
     monkeypatch.setattr(
         "agent.listing_agency_resolver.get_listing_agency_resolver_provider",
         lambda: _ResolverRaises(UnknownListingError("listing not found")),
@@ -264,10 +286,76 @@ async def test_tool_resolver_unknown_listing_returns_error_dict(monkeypatch):
     result = await create_or_get_lead.ainvoke(
         {"client_id": CLIENT_ID, "listing_id": LISTING_ID}
     )
-    # FakeLead no consulta el registry → retorna un lead con agency_id=None registrado
-    # (agency_registry.register no se llamó), pero el tool sí retorna el dict del lead.
-    assert isinstance(result, dict)
-    # No debe propagar excepción — el error queda encapsulado en el flujo.
-    # El campo "error" puede ser None (FakeLead no hace la validación del registry)
-    # o contener un mensaje si alguna validación intermedia falla.
-    assert "client_id" in result or "error" in result
+    assert result.get("code") == "UNKNOWN_LISTING"
+    assert result["error_code"] is None
+    assert "create_or_get_lead" not in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_tool_resolver_connect_error_returns_backend_unavailable(monkeypatch):
+    """ConnectError del resolver → code='BACKEND_UNAVAILABLE', error_code=None."""
+    monkeypatch.setattr(
+        "agent.listing_agency_resolver.get_listing_agency_resolver_provider",
+        lambda: _ResolverRaises(httpx.ConnectError("connection refused")),
+    )
+
+    result = await create_or_get_lead.ainvoke(
+        {"client_id": CLIENT_ID, "listing_id": LISTING_ID}
+    )
+    assert result.get("code") == "BACKEND_UNAVAILABLE"
+    assert result["error_code"] is None
+
+
+@pytest.mark.asyncio
+async def test_tool_resolver_503_returns_backend_unavailable(monkeypatch):
+    """HTTPStatusError 503 del resolver → code='BACKEND_UNAVAILABLE', error_code=503."""
+    resp = httpx.Response(503, request=httpx.Request("GET", "http://x"))
+    exc = httpx.HTTPStatusError("service unavailable", request=resp.request, response=resp)
+    monkeypatch.setattr(
+        "agent.listing_agency_resolver.get_listing_agency_resolver_provider",
+        lambda: _ResolverRaises(exc),
+    )
+
+    result = await create_or_get_lead.ainvoke(
+        {"client_id": CLIENT_ID, "listing_id": LISTING_ID}
+    )
+    assert result.get("code") == "BACKEND_UNAVAILABLE"
+    assert result["error_code"] == 503
+
+
+@pytest.mark.asyncio
+async def test_tool_resolver_403_returns_backend_auth_error(monkeypatch):
+    """HTTPStatusError 403 del resolver → code='BACKEND_AUTH_ERROR', error_code=403."""
+    resp = httpx.Response(
+        403,
+        content=b'{"detail":"no AI_AGENT row"}',
+        request=httpx.Request("GET", "http://x"),
+    )
+    exc = httpx.HTTPStatusError("forbidden", request=resp.request, response=resp)
+    monkeypatch.setattr(
+        "agent.listing_agency_resolver.get_listing_agency_resolver_provider",
+        lambda: _ResolverRaises(exc),
+    )
+
+    result = await create_or_get_lead.ainvoke(
+        {"client_id": CLIENT_ID, "listing_id": LISTING_ID}
+    )
+    assert result.get("code") == "BACKEND_AUTH_ERROR"
+    assert result["error_code"] == 403
+
+
+@pytest.mark.asyncio
+async def test_tool_all_fake_happy_path_uses_default_agency(monkeypatch):
+    """Modo todo-fake: el resolver retorna FAKE_DEFAULT_AGENCY_ID y el tool devuelve lead."""
+    from agent.fakes import FAKE_DEFAULT_AGENCY_ID
+    monkeypatch.setenv("LEAD_MODE", "fake")
+    monkeypatch.delenv("LISTING_AGENCY_RESOLVER_MODE", raising=False)  # default=fake
+
+    result = await create_or_get_lead.ainvoke(
+        {"client_id": CLIENT_ID, "listing_id": LISTING_ID}
+    )
+    assert result["error"] is None
+    assert result["error_code"] is None
+    # El registry debe haber recibido el listing_id con FAKE_DEFAULT_AGENCY_ID
+    from agent import agency_registry
+    assert agency_registry.lookup(LISTING_ID) == FAKE_DEFAULT_AGENCY_ID

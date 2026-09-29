@@ -158,12 +158,16 @@ async def save_liked_property(client_id, property_id):
 
 @tool(args_schema=RequestVisitInput)
 async def request_visit(client_id, property_description, preferred_datetime):
-    """Request a property visit WITHOUT checking the real catalog/availability
-    (use this only while search_properties/check_availability have no real
-    data to offer — i.e. the database isn't connected yet). Sends the
-    request directly to the human agent by email, based only on what the
-    client described in the conversation. Do not invent a client_id — use
-    the one given in the system context for this conversation."""
+    """Solicita una visita directamente al agente humano por correo, SIN consultar
+    el catálogo ni la disponibilidad real. SOLO usar cuando NO se tiene un
+    listing_id real (catálogo desconectado o propiedad no encontrada en búsqueda).
+    Si ya tienes un listing_id, usa siempre el flujo completo:
+    create_or_get_lead → check_agent_availability → book_appointment.
+    NUNCA uses request_visit como fallback cuando esos tools fallen —
+    si create_or_get_lead devuelve code='BACKEND_UNAVAILABLE' o
+    code='BACKEND_AUTH_ERROR', informa al cliente del problema técnico y
+    dile que un agente lo contactará pronto; no llames request_visit.
+    No inventes client_id — usa el del contexto del sistema."""
     import os
     import uuid
     from agent.notifications import send_manual_visit_request
@@ -210,28 +214,51 @@ async def create_or_get_lead(client_id, listing_id):
 
     # Resolver listing_id → agency_id antes de llamar al backend, de modo que
     # HttpLead pueda incluir X-Agency-Id en POST /leads.
+    # Cada rama de error retorna inmediatamente con un `code` legible por el LLM;
+    # si llegamos al bloque de provider, agency_id es siempre un str válido.
     resolver = get_listing_agency_resolver_provider()
     try:
-        agency_id: str | None = await resolver.resolve(listing_id)
+        agency_id: str = await resolver.resolve(listing_id)
         agency_registry.register(listing_id=listing_id, agency_id=agency_id)
     except UnknownListingError:
-        # Listing no mapeado a ninguna agencia conocida: HttpLead lanzará
-        # UnregisteredEntityError — el tool retorna error al LLM.
-        agency_id = None
-    except httpx.HTTPStatusError as e:
-        # 403/5xx del resolver (auth, infra) — devolvemos dict de error para
-        # no dejar escapar la excepción al grafo (evita envenenamiento de
-        # MemorySaver). El LLM recibe el error y puede informar al usuario.
-        code = e.response.status_code
+        # 404/422 del resolver: listing inexistente o fuera de la agencia del bot.
         return {
             "client_id": client_id,
             "listing_id": listing_id,
-            "error": f"Error del servidor ({code}) al validar el listing.",
-            "error_code": code,
+            "error": (
+                f"El listing {listing_id!r} no existe o no está disponible "
+                f"bajo la agencia del bot. Verifica que el listing_id sea correcto."
+            ),
+            "error_code": None,
+            "code": "UNKNOWN_LISTING",
+        }
+    except httpx.HTTPStatusError as e:
+        http_code = e.response.status_code
+        if http_code in (400, 401, 403):
+            code_str = "BACKEND_AUTH_ERROR"
+            msg = f"Error de autenticación ({http_code}) al validar el listing."
+        else:
+            code_str = "BACKEND_UNAVAILABLE"
+            msg = f"Error del servidor ({http_code}) al validar el listing."
+        return {
+            "client_id": client_id,
+            "listing_id": listing_id,
+            "error": msg,
+            "error_code": http_code,
+            "code": code_str,
+        }
+    except httpx.TransportError as e:
+        # ConnectError, ReadTimeout, u otro error de transporte del resolver.
+        return {
+            "client_id": client_id,
+            "listing_id": listing_id,
+            "error": str(e),
+            "error_code": None,
+            "code": "BACKEND_UNAVAILABLE",
         }
     except Exception as e:
-        # Cualquier otro fallo del resolver (ej. ReadTimeout por cold-start)
-        # no debe propagar fuera del tool — misma razón que el caso anterior.
+        # Error no categorizado del resolver — no agregar `code` para no
+        # prometer más de lo que sabemos.
         return {
             "client_id": client_id,
             "listing_id": listing_id,
@@ -243,14 +270,12 @@ async def create_or_get_lead(client_id, listing_id):
     try:
         # source_channel: IN_APP como stopgap — el backend no acepta TELEGRAM (ask #1).
         result = await provider.create_or_get_lead(client_id, listing_id, "IN_APP")
-        # Registrar también bajo lead_id y agent_id para que HttpAppointmentBooking
-        # y HttpAgentSlots puedan recuperar el agency_id por sus propios ids.
-        if agency_id is not None:
-            agency_registry.register(
-                lead_id=result["id"],
-                agent_id=result["agent_id"],
-                agency_id=agency_id,
-            )
+        # agency_id es siempre str aquí (todas las ramas de fallo retornaron arriba).
+        agency_registry.register(
+            lead_id=result["id"],
+            agent_id=result["agent_id"],
+            agency_id=agency_id,
+        )
         return {**result, "error": None, "error_code": None}
     except httpx.HTTPStatusError as e:
         code = e.response.status_code

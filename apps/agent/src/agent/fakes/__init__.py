@@ -134,6 +134,11 @@ KNOWN_AGENCY_IDS: frozenset[str] = frozenset({
     "060edf5b-3911-4497-ba43-b2badf0f06cb",  # Sánchez, Hernández and Álvarez Realty
 })
 
+# Agency_id por defecto que el resolver fake retorna cuando el listing_id no
+# está en su mapping explícito. Permite que el modo todo-fake funcione end-to-end
+# sin necesidad de configurar mappings en cada test.
+FAKE_DEFAULT_AGENCY_ID = "8768a84f-a76a-4de6-8e9e-1a11fcbb4e59"  # Cruz-Oviedo Realty
+
 
 class UnknownListingError(KeyError):
     """El listing_id no está mapeado a ninguna agencia conocida."""
@@ -209,18 +214,15 @@ class FakeConversationStore(ConversationStorePort):
 class FakeListingAgencyResolver(ListingAgencyResolverPort):
     """Mapea listing_id → agency_id en memoria.
 
-    Arranca vacío (aún no hay listings reales del backend). Los pares se
-    pasan por el constructor en tests. Los agency_ids válidos viven en
-    KNOWN_AGENCY_IDS.
+    Si el listing_id no está en el mapping explícito, retorna
+    FAKE_DEFAULT_AGENCY_ID en lugar de lanzar — esto permite que el modo
+    todo-fake funcione end-to-end sin configurar mappings. Para simular
+    un listing desconocido en tests usa el stub _ResolverRaises con
+    UnknownListingError.
     """
 
     def __init__(self, mapping: dict[str, str] | None = None):
         self._map: dict[str, str] = dict(mapping or {})
 
     async def resolve(self, listing_id: str) -> str:
-        try:
-            return self._map[listing_id]
-        except KeyError:
-            raise UnknownListingError(
-                f"listing_id {listing_id!r} no está mapeado a ninguna agencia conocida"
-            )
+        return self._map.get(listing_id, FAKE_DEFAULT_AGENCY_ID)

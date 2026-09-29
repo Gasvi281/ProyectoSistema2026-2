@@ -9,7 +9,7 @@ import json
 import httpx
 import pytest
 
-from agent.fakes import FakeListingAgencyResolver, UnknownListingError, KNOWN_AGENCY_IDS
+from agent.fakes import FakeListingAgencyResolver, UnknownListingError, KNOWN_AGENCY_IDS, FAKE_DEFAULT_AGENCY_ID
 from agent.listing_agency_resolver import (
     HttpListingAgencyResolver,
     get_listing_agency_resolver_provider,
@@ -41,11 +41,17 @@ async def test_known_listing_agency_is_in_known_agencies():
 
 
 @pytest.mark.asyncio
-async def test_unknown_listing_raises_error():
-    """Un listing no mapeado lanza UnknownListingError — nunca retorna None."""
+async def test_unknown_listing_returns_default_agency():
+    """Un listing no mapeado retorna FAKE_DEFAULT_AGENCY_ID — nunca lanza ni None.
+
+    El fake ya no simula un listing desconocido: su contrato es "siempre resuelvo,
+    con el agency_id que te di explícitamente o con el default". Para probar la
+    rama UNKNOWN_LISTING en los tools usa el stub _ResolverRaises(UnknownListingError).
+    """
     resolver = FakeListingAgencyResolver()  # sin seed
-    with pytest.raises(UnknownListingError):
-        await resolver.resolve("00000000-0000-0000-0000-000000000000")
+    result = await resolver.resolve("00000000-0000-0000-0000-000000000000")
+    assert result == FAKE_DEFAULT_AGENCY_ID
+    assert result in KNOWN_AGENCY_IDS
 
 
 # ---------------------------------------------------------------------------
