@@ -70,6 +70,9 @@ async def test_tool_fake_mode_success(monkeypatch):
     assert result["id"].startswith("lead-")
     assert result["error"] is None
     assert result["error_code"] is None
+    # El tool debe pasar TELEGRAM al provider — verificado contra el backend
+    # (homelitics-crm/app/schemas.py:17: Channel = Literal["TELEGRAM","IN_APP","CALL"]).
+    assert result["source_channel"] == "TELEGRAM"
 
 
 @pytest.mark.asyncio
