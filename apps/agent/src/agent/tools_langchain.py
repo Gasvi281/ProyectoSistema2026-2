@@ -8,12 +8,13 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 class SearchInput(BaseModel):
-    location: Optional[str] = Field(None, description="City or neighborhood")
-    min_price: Optional[int] = Field(None, description="Min price in COP")
-    max_price: Optional[int] = Field(None, description="Max price in COP")
-    min_bedrooms: Optional[int] = Field(None, description="Min bedrooms")
-    max_bedrooms: Optional[int] = Field(None, description="Max bedrooms")
-    property_type: Optional[str] = Field(None, description="apartment, house, or commercial")
+    location: Optional[str] = Field(None, description="Ciudad o barrio (ej. 'Laureles', 'Medellín')")
+    min_price: Optional[int] = Field(None, description="Precio mínimo en COP")
+    max_price: Optional[int] = Field(None, description="Precio máximo en COP")
+    min_bedrooms: Optional[int] = Field(None, description="Número mínimo de habitaciones")
+    max_bedrooms: Optional[int] = Field(None, description="Número máximo de habitaciones")
+    property_type: Optional[str] = Field(None, description="Tipo de inmueble: APARTMENT, HOUSE, STUDIO, COUNTRY_HOUSE")
+    operation_type: Optional[str] = Field(None, description="Operación: SALE (comprar/venta) o RENT (arrendar/arriendo)")
 
 class PropertyQAInput(BaseModel):
     property_id: str = Field(..., description="Property ID")
@@ -54,51 +55,143 @@ class BookAppointmentInput(BaseModel):
     agent_id: Optional[str] = Field(None, description="ID del agente inmobiliario — obtenido de create_or_get_lead; requerido para proponer alternativas si el slot no está disponible")
 
 @tool(args_schema=SearchInput)
-def search_properties(location=None, min_price=None, max_price=None, min_bedrooms=None, max_bedrooms=None, property_type=None):
-    """Search property catalog. Grounding: returns no-matches message if empty, never invents."""
-    from agent.fakes import FakeCatalog
+async def search_properties(location=None, min_price=None, max_price=None, min_bedrooms=None, max_bedrooms=None, property_type=None, operation_type=None):
+    """Busca propiedades en el catálogo usando lenguaje natural.
+
+    Devuelve un dict con:
+    - `results`: lista de propiedades con sus `id` internos (úsalos en create_or_get_lead).
+    - `summary`: lista numerada legible para el cliente — SIN UUIDs.
+    - `count`: 0 si no hay coincidencias — NUNCA inventes propiedades.
+
+    Cuando el cliente elija una propiedad (por número o nombre), resuelve su `id`
+    desde `results` y pásalo a create_or_get_lead. Nunca muestres ni inventes el `id`."""
+    import httpx
     from agent.types import SearchFilters
-    
-    catalog = FakeCatalog()
-    filters = SearchFilters(location=location, min_price=min_price, max_price=max_price, min_bedrooms=min_bedrooms, max_bedrooms=max_bedrooms, property_type=property_type)
-    results = catalog.properties.values()
-    
-    filtered = []
-    for prop in results:
-        if location and prop.location.lower() != location.lower(): continue
-        if min_price and prop.price < min_price: continue
-        if max_price and prop.price > max_price: continue
-        if min_bedrooms and prop.bedrooms < min_bedrooms: continue
-        if max_bedrooms and prop.bedrooms > max_bedrooms: continue
-        if property_type and prop.property_type != property_type: continue
-        filtered.append(prop)
-    
-    if not filtered:
-        return "No properties match. Try adjusting budget, location, or rooms."
-    
-    result_text = f"Found {len(filtered[:5])} properties:\n"
-    for prop in filtered[:5]:
-        result_text += f"- {prop.name} ({prop.location}): ${prop.price:,} | {prop.bedrooms}bed {prop.bathrooms}bath | ID:{prop.id}\n"
-    return result_text
+    from agent.listing_search import get_listing_search_provider
+
+    provider = get_listing_search_provider()
+    filters = SearchFilters(
+        location=location,
+        min_price=min_price,
+        max_price=max_price,
+        min_bedrooms=min_bedrooms,
+        max_bedrooms=max_bedrooms,
+        property_type=property_type,
+        operation_type=operation_type,
+    )
+
+    try:
+        props = await provider.search(filters, limit=5)
+    except httpx.HTTPStatusError as e:
+        http_code = e.response.status_code
+        if http_code in (400, 401, 403):
+            return {
+                "results": [], "count": 0, "summary": "",
+                "error": f"Error de autenticación ({http_code}) al buscar propiedades.",
+                "error_code": http_code, "code": "BACKEND_AUTH_ERROR",
+            }
+        return {
+            "results": [], "count": 0, "summary": "",
+            "error": f"Error del servidor ({http_code}) al buscar propiedades.",
+            "error_code": http_code, "code": "BACKEND_UNAVAILABLE",
+        }
+    except httpx.TransportError as e:
+        return {
+            "results": [], "count": 0, "summary": "",
+            "error": str(e), "error_code": None, "code": "BACKEND_UNAVAILABLE",
+        }
+    except Exception as e:
+        return {
+            "results": [], "count": 0, "summary": "",
+            "error": str(e), "error_code": None,
+        }
+
+    if not props:
+        return {"results": [], "count": 0, "summary": "", "error": None, "error_code": None}
+
+    _op_es = {"SALE": "venta", "RENT": "arriendo"}
+    results = []
+    summary_lines = []
+    for n, prop in enumerate(props, 1):
+        op_label = _op_es.get(prop.operation_type or "", prop.operation_type or "")
+        results.append({
+            "n": n,
+            "id": prop.id,
+            "name": prop.name,
+            "location": prop.location,
+            "price": prop.price,
+            "bedrooms": prop.bedrooms,
+            "operation_type": prop.operation_type,
+        })
+        line = f"{n}. {prop.name} — {prop.location} — ${prop.price:,} COP — {prop.bedrooms} hab"
+        if op_label:
+            line += f" — {op_label}"
+        summary_lines.append(line)
+
+    return {
+        "results": results,
+        "count": len(results),
+        "summary": "\n".join(summary_lines),
+        "error": None,
+        "error_code": None,
+    }
 
 @tool(args_schema=PropertyQAInput)
-def answer_property_question(property_id, question):
-    """Answer facts about a property from record only. No hallucination."""
-    from agent.fakes import FakeCatalog
-    catalog = FakeCatalog()
-    prop = catalog.properties.get(property_id)
-    if not prop:
-        return f"Property {property_id} not found."
-    
+async def answer_property_question(property_id, question):
+    """Responde preguntas sobre una propiedad del catálogo.
+
+    Usa el `id` de los `results` de search_properties — nunca un UUID inventado.
+    Solo cita datos del registro; admite cuando la información no está disponible.
+    Retorna un dict con `answer` en éxito, o `code` en error."""
+    import httpx
+    from agent.listing_search import get_listing_search_provider
+
+    provider = get_listing_search_provider()
+
+    try:
+        prop = await provider.get_listing(property_id)
+    except httpx.HTTPStatusError as e:
+        http_code = e.response.status_code
+        if http_code in (400, 401, 403):
+            return {"answer": None, "error": f"Error de autenticación ({http_code}).", "error_code": http_code, "code": "BACKEND_AUTH_ERROR"}
+        return {"answer": None, "error": f"Error del servidor ({http_code}).", "error_code": http_code, "code": "BACKEND_UNAVAILABLE"}
+    except httpx.TransportError as e:
+        return {"answer": None, "error": str(e), "error_code": None, "code": "BACKEND_UNAVAILABLE"}
+    except Exception as e:
+        return {"answer": None, "error": str(e), "error_code": None}
+
+    if prop is None:
+        return {
+            "answer": None,
+            "error": f"La propiedad {property_id!r} no fue encontrada o no está disponible.",
+            "error_code": None,
+            "code": "UNKNOWN_LISTING",
+        }
+
     q = question.lower()
-    if "price" in q: return f"${prop.price:,} COP"
-    if "area" in q or "size" in q: return f"{prop.area_sqm}m²"
-    if "bed" in q: return f"{prop.bedrooms} bedrooms"
-    if "bath" in q: return f"{prop.bathrooms} bathrooms"
-    if "feature" in q: return f"{', '.join(prop.features) if prop.features else 'No special features'}"
-    if "location" in q: return f"{prop.location}"
-    if "type" in q: return f"{prop.property_type}"
-    return f"{prop.name}: ${prop.price:,} | {prop.bedrooms}bed {prop.bathrooms}bath {prop.area_sqm}m² | {prop.location}"
+    _op_es = {"SALE": "En venta", "RENT": "En arriendo"}
+    if "precio" in q or "price" in q or "costo" in q or "valor" in q:
+        answer = f"${prop.price:,} COP"
+    elif "área" in q or "area" in q or "tamaño" in q or "size" in q or "metros" in q or "m2" in q:
+        answer = f"{prop.area_sqm} m²"
+    elif "hab" in q or "cuart" in q or "bed" in q or "dormit" in q:
+        answer = f"{prop.bedrooms} habitaciones"
+    elif "baño" in q or "bath" in q:
+        answer = f"{prop.bathrooms} baños"
+    elif "barrio" in q or "sector" in q or "ubicación" in q or "location" in q:
+        answer = prop.location
+    elif "tipo" in q or "type" in q:
+        answer = prop.property_type
+    elif "venta" in q or "arriendo" in q or "operación" in q or "rent" in q or "sale" in q:
+        answer = _op_es.get(prop.operation_type or "", prop.operation_type or "No especificado")
+    else:
+        op = _op_es.get(prop.operation_type or "", "")
+        answer = (
+            f"{prop.name}: ${prop.price:,} COP | {prop.bedrooms} hab {prop.bathrooms} baños "
+            f"{prop.area_sqm} m² | {prop.location}" + (f" | {op}" if op else "")
+        )
+
+    return {"answer": answer, "error": None, "error_code": None}
 
 @tool(args_schema=AvailabilityInput)
 def check_availability(property_id, start_date, end_date):
