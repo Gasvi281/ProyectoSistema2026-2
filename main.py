@@ -38,6 +38,7 @@ from telegram_service import send_message
 from agent.core_langchain import handle_turn
 from agent.observability import flush_traces
 from agent.leads import check_lead_modes
+from agent.listing_search import check_listing_search_modes
 import chat_history
 
 
@@ -45,6 +46,7 @@ import chat_history
 async def lifespan(app: FastAPI):
     # Falla rápido si la combinación de modos de provider es inválida.
     check_lead_modes()
+    check_listing_search_modes()
     yield
     # Vaciar trazas pendientes de Langfuse antes de que el proceso muera.
     # Es un no-op cuando el tracing está deshabilitado.

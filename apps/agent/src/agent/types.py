@@ -15,6 +15,7 @@ class Property:
     property_type: str
     features: list[str] = field(default_factory=list)
     description: str = ""
+    operation_type: Optional[str] = None  # "SALE" | "RENT" | None
 
 @dataclass
 class AvailableSlot:
@@ -42,6 +43,7 @@ class SearchFilters:
     min_bedrooms: Optional[int] = None
     max_bedrooms: Optional[int] = None
     property_type: Optional[str] = None
+    operation_type: Optional[str] = None  # "SALE" | "RENT" | None
 
 @dataclass
 class AgentReply:
