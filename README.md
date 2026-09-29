@@ -414,7 +414,29 @@ Ambos son **en memoria**: se pierden si reinicias `uvicorn`.
 
 ---
 
-## 9. Troubleshooting
+## 9. Tracing con Langfuse (opcional)
+
+El agente puede enviar trazas a [Langfuse](https://cloud.langfuse.com) — una
+traza por turno, con spans anidados por llamada al LLM y por tool, agrupadas
+por conversación (session) y por cliente (user).
+
+**Cómo activarlo:**
+
+1. Crea un proyecto en https://cloud.langfuse.com → Settings → API keys.
+2. En tu `.env` (raíz del repo), agrega:
+   ```
+   LANGFUSE_PUBLIC_KEY=pk-lf-...
+   LANGFUSE_SECRET_KEY=sk-lf-...
+   LANGFUSE_BASE_URL=https://cloud.langfuse.com   # omite si usas Cloud
+   ```
+3. Reinicia el servidor (`.\run.ps1`).
+
+Si las keys no están configuradas el tracing queda deshabilitado — sin errores,
+sin warnings, sin diferencia de comportamiento.
+
+---
+
+## 10. Troubleshooting
 
 | Síntoma | Dónde revisar |
 |---|---|
