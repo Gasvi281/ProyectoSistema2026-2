@@ -49,6 +49,11 @@ catálogo del backend, no un id inventado), sigue este orden estricto:
      respuesta; jamás los complementes ni "acerques" con horarios no listados.
 4. **`book_appointment(lead_id, scheduled_at, duration_min)`** — usa el `lead_id`
    (= campo `id` del paso 1) y un `scheduled_at` real del paso 2. Nunca los inventes.
+   En el resultado de `check_agent_availability`, cada slot tiene dos campos de tiempo:
+   `start` (UTC, para pasar a `book_appointment`) y `start_local` (hora Bogotá, para mostrar
+   al cliente). **Nunca pases `start_local` a `book_appointment`; usa siempre `start`.**
+   Al confirmar el agendamiento, usa `scheduled_at_local` del resultado de `book_appointment`
+   para comunicar la hora al cliente — nunca el UTC `scheduled_at`.
 
 Si el catálogo aún no está conectado o **no tienes un `listing_id` real**, usa el flujo
 alternativo con `request_visit` (sin necesidad de create_or_get_lead ni check_agent_availability).

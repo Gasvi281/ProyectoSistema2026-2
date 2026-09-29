@@ -44,6 +44,14 @@ async def test_tool_fake_mode_success(monkeypatch):
     assert result["status"] == "PENDING_CONFIRMATION"
     assert result["error"] is None
     assert result["error_code"] is None
+    # scheduled_at_local debe estar presente y representar la hora en Bogotá.
+    # 09:00 UTC = 04:00 America/Bogota (UTC-5).
+    assert "scheduled_at_local" in result
+    assert result["scheduled_at_local"] is not None
+    assert "hora Bogotá" in result["scheduled_at_local"]
+    assert "04:00" in result["scheduled_at_local"]
+    # scheduled_at UTC permanece inalterado.
+    assert result["scheduled_at"] == SCHEDULED_AT
 
 
 @pytest.mark.asyncio

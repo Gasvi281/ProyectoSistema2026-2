@@ -413,7 +413,15 @@ async def book_appointment(lead_id, scheduled_at, duration_min=60, agent_id=None
     provider = get_appointment_booking_provider()
     try:
         result = await provider.book(lead_id, scheduled_at, duration_min)
-        return {**result, "error": None, "error_code": None}
+        # Añadimos scheduled_at_local (hora Bogotá) para que el mensaje de confirmación
+        # al cliente use hora local. El campo scheduled_at (UTC) sigue siendo la fuente
+        # de verdad para integraciones — no lo reemplazamos.
+        from agent.agent_slots import _to_local
+        try:
+            local_str = _to_local(scheduled_at)
+        except Exception:
+            local_str = None
+        return {**result, "error": None, "error_code": None, "scheduled_at_local": local_str}
     except httpx.HTTPStatusError as e:
         code = e.response.status_code
         # Extraer detail del cuerpo JSON; si no es JSON, usar cadena vacía.

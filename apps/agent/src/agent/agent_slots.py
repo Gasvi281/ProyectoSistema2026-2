@@ -10,6 +10,7 @@ más factory get_agent_slots_provider() seleccionada por AGENT_SLOTS_MODE.
 
 import os
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -17,12 +18,27 @@ from agent.ports import AgentSlotsPort
 from agent.backend_auth import check_backend_config, get_auth_headers
 from agent import agency_registry
 
+BOGOTA_TZ = ZoneInfo("America/Bogota")
+
 
 def _iso_add_minutes(start_iso: str, minutes: int) -> str:
     # Python 3.10 fromisoformat no acepta 'Z' como sufijo de zona horaria.
     normalized = start_iso.replace("Z", "+00:00")
     dt = datetime.fromisoformat(normalized)
     return (dt + timedelta(minutes=minutes)).isoformat()
+
+
+def _to_local(start_iso: str) -> str:
+    """Convierte un ISO 8601 UTC al formato legible en hora Bogotá.
+
+    Retorna 'DD/MM/YYYY HH:MM (hora Bogotá)' — el mismo formato que usa
+    booking_recovery.format_alternatives() para mantener consistencia
+    en los mensajes al cliente.
+    """
+    normalized = start_iso.replace("Z", "+00:00")
+    dt_utc = datetime.fromisoformat(normalized)
+    dt_bogota = dt_utc.astimezone(BOGOTA_TZ)
+    return dt_bogota.strftime("%d/%m/%Y %H:%M") + " (hora Bogotá)"
 
 
 class HttpAgentSlots(AgentSlotsPort):
@@ -55,7 +71,14 @@ class HttpAgentSlots(AgentSlotsPort):
         slot_minutes = data.get("slot_minutes", 30)
         raw_slots = data.get("slots", [])
         slots = [
-            {"start": s, "end": _iso_add_minutes(s, slot_minutes)}
+            {
+                "start": s,
+                "end": _iso_add_minutes(s, slot_minutes),
+                # start_local: representación en hora Bogotá para mostrar al cliente.
+                # Usa siempre el campo `start` (UTC) para pasar a book_appointment —
+                # nunca start_local, que es solo para lectura humana.
+                "start_local": _to_local(s),
+            }
             for s in raw_slots
         ]
         return {

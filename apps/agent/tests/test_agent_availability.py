@@ -2,7 +2,7 @@
 import pytest
 from datetime import datetime, timedelta, timezone
 from agent.tools_langchain import check_agent_availability
-from agent.agent_slots import _iso_add_minutes, HttpAgentSlots
+from agent.agent_slots import _iso_add_minutes, _to_local, HttpAgentSlots
 from agent.fakes import FakeAgentSlots
 from agent.ports import AgentSlotsPort
 from agent import agency_registry
@@ -41,6 +41,11 @@ async def test_fake_returns_slots():
     start_dt = datetime.fromisoformat(first["start"])
     end_dt = datetime.fromisoformat(first["end"])
     assert end_dt - start_dt == timedelta(minutes=FakeAgentSlots.SLOT_MINUTES)
+    # start_local debe estar presente y ser una representación en hora Bogotá.
+    assert "start_local" in first
+    assert "hora Bogotá" in first["start_local"]
+    # start sigue siendo UTC — _to_local lo convirtió desde ese valor.
+    assert first["start"] == first["start"]  # UTC original intacto
 
 
 # --- check_agent_availability tool (via fake mode, default AGENT_SLOTS_MODE) ---
@@ -57,6 +62,13 @@ async def test_tool_returns_slots_fake_mode(monkeypatch):
     assert result["error"] is None
     for slot in result["slots"]:
         assert "start" in slot and "end" in slot
+        # Cada slot expone start_local (hora Bogotá) para el LLM y start (UTC)
+        # para pasar a book_appointment — ambos deben estar presentes.
+        assert "start_local" in slot, f"slot sin start_local: {slot}"
+        assert "hora Bogotá" in slot["start_local"]
+        # start es UTC: isoformato válido con offset.
+        dt = datetime.fromisoformat(slot["start"])
+        assert dt.tzinfo is not None
 
 
 @pytest.mark.asyncio
@@ -119,9 +131,14 @@ async def test_http_provider_parses_response(monkeypatch):
     assert result["agent_id"] == AGENT_ID
     assert result["slot_minutes"] == 30
     assert len(result["slots"]) == 2
-    assert result["slots"][0]["start"] == "2026-09-10T14:00:00Z"
+    first = result["slots"][0]
+    assert first["start"] == "2026-09-10T14:00:00Z"
     expected_end = _iso_add_minutes("2026-09-10T14:00:00Z", 30)
-    assert result["slots"][0]["end"] == expected_end
+    assert first["end"] == expected_end
+    # start_local: 14:00 UTC = 09:00 America/Bogota (UTC-5).
+    assert "start_local" in first
+    assert "09:00" in first["start_local"]
+    assert "hora Bogotá" in first["start_local"]
 
 
 # --- guard de configuración del backend ---
@@ -150,3 +167,27 @@ def test_http_provider_accepts_dev_agent_id(monkeypatch):
     monkeypatch.setenv("DEV_AGENT_ID", "dev-agent-123")
     provider = HttpAgentSlots()  # no debe lanzar
     assert provider.base_url == "http://localhost:8000"
+
+
+# --- _to_local helper ---
+
+def test_to_local_utc_z():
+    """14:00 UTC = 09:00 America/Bogota (UTC-5, sin DST)."""
+    result = _to_local("2026-09-10T14:00:00Z")
+    assert "09:00" in result
+    assert "hora Bogotá" in result
+    assert "10/09/2026" in result
+
+
+def test_to_local_plus_offset():
+    """Acepta offset +00:00 además del sufijo Z."""
+    result = _to_local("2026-09-10T14:00:00+00:00")
+    assert "09:00" in result
+    assert "hora Bogotá" in result
+
+
+def test_to_local_midnight_utc():
+    """00:00 UTC = 19:00 del día anterior en Bogotá."""
+    result = _to_local("2026-09-10T00:00:00Z")
+    assert "19:00" in result
+    assert "09/09/2026" in result

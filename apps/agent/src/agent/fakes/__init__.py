@@ -149,12 +149,18 @@ class FakeAgentSlots(AgentSlotsPort):
     SLOT_MINUTES = 30
 
     async def list_agent_slots(self, agent_id: str, date_from: str, date_to: str) -> dict:
+        from agent.agent_slots import _to_local
         base = datetime(2026, 9, 10, 9, 0, tzinfo=timezone.utc)
         slots = []
         for offset in range(4):
             start = base + timedelta(hours=offset)
             end = start + timedelta(minutes=self.SLOT_MINUTES)
-            slots.append({"start": start.isoformat(), "end": end.isoformat()})
+            start_iso = start.isoformat()
+            slots.append({
+                "start": start_iso,
+                "end": end.isoformat(),
+                "start_local": _to_local(start_iso),
+            })
         return {
             "agent_id": agent_id,
             "slot_minutes": self.SLOT_MINUTES,
