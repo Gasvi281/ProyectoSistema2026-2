@@ -1,7 +1,8 @@
 """LangChain tools for property search, Q&A, availability, scheduling."""
 import logging
+import re
 from typing import Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from langchain.tools import tool
 from datetime import datetime
 
@@ -34,10 +35,45 @@ class LikePropertyInput(BaseModel):
     client_id: str = Field(..., description="Client ID")
     property_id: str = Field(..., description="Property ID")
 
+_UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+    re.IGNORECASE,
+)
+
+
 class RequestVisitInput(BaseModel):
     client_id: str = Field(..., description="Client ID — usa el que aparece al inicio del mensaje del sistema, nunca lo inventes")
-    property_description: str = Field(..., description="Descripción del inmueble en las propias palabras del cliente (ubicación, tipo, lo que haya mencionado)")
-    preferred_datetime: str = Field(..., description="Fecha/hora preferida tal como la expresó el cliente (puede ser texto libre, ej. 'mañana en la tarde')")
+    property_description: str = Field(
+        ...,
+        description=(
+            "Descripción del inmueble en las propias palabras del cliente "
+            "(ubicación, tipo, lo que haya mencionado). "
+            "NO incluyas un UUID aquí — si tienes un listing_id real, usa el flujo "
+            "create_or_get_lead → check_agent_availability → book_appointment."
+        ),
+    )
+    preferred_datetime: Optional[datetime] = Field(
+        None,
+        description=(
+            "Fecha y hora preferida en formato ISO 8601 con zona horaria "
+            "(ej. '2026-09-10T14:00:00-05:00'). "
+            "Pasa None cuando el cliente sea flexible o diga 'lo antes posible' — "
+            "NUNCA inventes una fecha ni uses texto libre."
+        ),
+    )
+
+    @field_validator("property_description")
+    @classmethod
+    def no_uuid_in_description(cls, v: str) -> str:
+        if _UUID_RE.search(v):
+            raise ValueError(
+                "property_description contiene un UUID. "
+                "Si tienes un listing_id real, usa el flujo estructurado: "
+                "create_or_get_lead(client_id, listing_id) → "
+                "check_agent_availability → book_appointment. "
+                "request_visit es solo para cuando NO tienes un listing_id."
+            )
+        return v
 
 class AgentAvailabilityInput(BaseModel):
     agent_id: str = Field(..., description="ID del agente inmobiliario cuya disponibilidad se quiere consultar")
@@ -51,7 +87,7 @@ class CreateLeadInput(BaseModel):
 class BookAppointmentInput(BaseModel):
     lead_id: str = Field(..., description="ID del lead/cliente — usa el que aparece al inicio del mensaje del sistema, nunca lo inventes")
     scheduled_at: str = Field(..., description="Fecha/hora del slot elegido — ISO 8601 con zona horaria, ej. '2026-09-10T09:00:00+00:00'. Debe ser un slot real obtenido de check_agent_availability, nunca inventado")
-    duration_min: int = Field(60, description="Duración de la visita en minutos (default 60)")
+    duration_min: int = Field(30, description="Duración de la visita en minutos (default 30, igual a slot_minutes del backend)")
     agent_id: Optional[str] = Field(None, description="ID del agente inmobiliario — obtenido de create_or_get_lead; requerido para proponer alternativas si el slot no está disponible")
 
 @tool(args_schema=SearchInput)
@@ -267,9 +303,12 @@ async def request_visit(client_id, property_description, preferred_datetime):
 
     appointment_id = f"manual-{uuid.uuid4().hex[:8]}"
 
+    # preferred_datetime es Optional[datetime]; serializar a str para la notificación.
+    dt_str = preferred_datetime.isoformat() if preferred_datetime is not None else "flexible/lo antes posible"
+
     try:
         ok = await send_manual_visit_request(
-            appointment_id, client_id, property_description, preferred_datetime
+            appointment_id, client_id, property_description, dt_str
         )
     except Exception as e:
         print(f"[request_visit] No se pudo notificar al agente: {e}")
@@ -361,8 +400,7 @@ async def create_or_get_lead(client_id, listing_id):
 
     provider = get_lead_provider()
     try:
-        # source_channel: IN_APP como stopgap — el backend no acepta TELEGRAM (ask #1).
-        result = await provider.create_or_get_lead(client_id, listing_id, "IN_APP")
+        result = await provider.create_or_get_lead(client_id, listing_id, "TELEGRAM")
         # agency_id es siempre str aquí (todas las ramas de fallo retornaron arriba).
         agency_registry.register(
             lead_id=result["id"],
@@ -385,6 +423,19 @@ async def create_or_get_lead(client_id, listing_id):
 async def check_agent_availability(agent_id, date_from, date_to):
     """Consulta los slots disponibles de un agente inmobiliario entre dos fechas.
     Solo retorna slots reales; si no hay ninguno retorna lista vacía — nunca inventa horarios."""
+    from agent import agency_registry
+    if not agency_registry.is_registered(agent_id):
+        return {
+            "agent_id": agent_id,
+            "slots": [],
+            "error": (
+                "No tengo un agente válido para consultar disponibilidad. "
+                "Ejecuta primero create_or_get_lead(client_id, listing_id) "
+                "y usa el agent_id que devuelve."
+            ),
+            "error_code": None,
+            "code": "BOT_AGENT_NOT_REGISTERED",
+        }
     from agent.agent_slots import get_agent_slots_provider
     provider = get_agent_slots_provider()
     try:
@@ -395,7 +446,7 @@ async def check_agent_availability(agent_id, date_from, date_to):
 
 
 @tool(args_schema=BookAppointmentInput)
-async def book_appointment(lead_id, scheduled_at, duration_min=60, agent_id=None):
+async def book_appointment(lead_id, scheduled_at, duration_min=30, agent_id=None):
     """Agenda una visita a una propiedad usando un slot real obtenido de check_agent_availability.
     Nunca inventes scheduled_at ni lead_id — usa solo valores confirmados en la conversación.
     Incluye agent_id (del resultado de create_or_get_lead) para que, en caso de conflicto,
@@ -409,6 +460,21 @@ async def book_appointment(lead_id, scheduled_at, duration_min=60, agent_id=None
         alternatives_window,
         UNAVAILABLE, TAKEN, TOO_SOON, OPEN_VISIT, CLOSED_LEAD, UNKNOWN,
     )
+    from agent import agency_registry
+    if not agency_registry.is_registered(lead_id):
+        return {
+            "lead_id": lead_id,
+            "scheduled_at": scheduled_at,
+            "error": (
+                "No tengo un lead válido para agendar. "
+                "Ejecuta primero create_or_get_lead(client_id, listing_id), "
+                "luego check_agent_availability, y finalmente book_appointment."
+            ),
+            "error_code": None,
+            "code": "BOT_LEAD_NOT_REGISTERED",
+            "category": UNKNOWN,
+            "alternatives": [],
+        }
 
     provider = get_appointment_booking_provider()
     try:

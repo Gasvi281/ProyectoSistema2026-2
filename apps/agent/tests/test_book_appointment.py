@@ -15,6 +15,16 @@ from agent.booking_recovery import (
 LEAD_ID = "lead-test-001"
 SCHEDULED_AT = "2026-09-10T09:00:00+00:00"
 DURATION_MIN = 60
+AGENT_ID = "agent-fake"
+
+
+@pytest.fixture(autouse=True)
+def _registry():
+    """Aísla el agency_registry y pre-registra LEAD_ID y AGENT_ID para los tests del tool."""
+    agency_registry.clear()
+    agency_registry.register(lead_id=LEAD_ID, agent_id=AGENT_ID, agency_id="agency-test-x")
+    yield
+    agency_registry.clear()
 
 
 # --- FakeAppointmentBooking ---
@@ -56,11 +66,12 @@ async def test_tool_fake_mode_success(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_tool_default_duration(monkeypatch):
+    """El default de duration_min es 30 (= slot_minutes del backend)."""
     monkeypatch.setenv("APPOINTMENT_BOOKING_MODE", "fake")
     result = await book_appointment.ainvoke(
         {"lead_id": LEAD_ID, "scheduled_at": SCHEDULED_AT}
     )
-    assert result["duration_min"] == 60
+    assert result["duration_min"] == 30
     assert result["error"] is None
 
 
@@ -408,3 +419,31 @@ async def test_unknown_error_logged_and_safe_message(monkeypatch, caplog):
     assert result["error"] is not None
     assert any("no reconocido" in r.message or "status" in r.message.lower()
                for r in caplog.records), "Se esperaba un warning para UNKNOWN"
+
+
+# --- guard: BOT_LEAD_NOT_REGISTERED ---
+
+@pytest.mark.asyncio
+async def test_tool_guard_unregistered_lead_id(monkeypatch):
+    """book_appointment con lead_id no registrado retorna BOT_LEAD_NOT_REGISTERED
+    sin hacer ninguna llamada HTTP ni al proveedor."""
+    agency_registry.clear()  # anula el fixture autouse para este caso
+    called = []
+
+    class ShouldNotBeCalled(AppointmentBookingPort):
+        async def book(self, lead_id, scheduled_at, duration_min):
+            called.append(True)
+            raise AssertionError("el guard debió parar antes de llegar al proveedor")
+
+    monkeypatch.setattr(
+        "agent.booking.get_appointment_booking_provider",
+        lambda: ShouldNotBeCalled(),
+    )
+    result = await book_appointment.ainvoke(
+        {"lead_id": "lead-no-registrado", "scheduled_at": SCHEDULED_AT, "duration_min": DURATION_MIN}
+    )
+    assert result.get("code") == "BOT_LEAD_NOT_REGISTERED"
+    assert result["error_code"] is None
+    assert result["alternatives"] == []
+    assert "create_or_get_lead" in result["error"]
+    assert not called, "el proveedor no debe ser invocado cuando el lead_id no está registrado"

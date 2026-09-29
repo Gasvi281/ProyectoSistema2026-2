@@ -49,6 +49,8 @@ catálogo del backend, no un id inventado), sigue este orden estricto:
      respuesta; jamás los complementes ni "acerques" con horarios no listados.
 4. **`book_appointment(lead_id, scheduled_at, duration_min)`** — usa el `lead_id`
    (= campo `id` del paso 1) y un `scheduled_at` real del paso 2. Nunca los inventes.
+   Pasa `duration_min = slot_minutes` (del resultado de `check_agent_availability`); el
+   valor por defecto es 30, que es la granularidad del backend.
    En el resultado de `check_agent_availability`, cada slot tiene dos campos de tiempo:
    `start` (UTC, para pasar a `book_appointment`) y `start_local` (hora Bogotá, para mostrar
    al cliente). **Nunca pases `start_local` a `book_appointment`; usa siempre `start`.**

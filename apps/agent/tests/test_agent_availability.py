@@ -13,6 +13,15 @@ DATE_TO = "2026-09-17T23:59:59+00:00"
 AGENT_ID = "agent-test-001"
 
 
+@pytest.fixture(autouse=True)
+def _registry(monkeypatch):
+    """Aísla el agency_registry y pre-registra AGENT_ID para los tests del tool."""
+    agency_registry.clear()
+    agency_registry.register(agent_id=AGENT_ID, agency_id="agency-test-x")
+    yield
+    agency_registry.clear()
+
+
 # --- _iso_add_minutes helper ---
 
 def test_iso_add_minutes_z_suffix():
@@ -191,3 +200,19 @@ def test_to_local_midnight_utc():
     result = _to_local("2026-09-10T00:00:00Z")
     assert "19:00" in result
     assert "09/09/2026" in result
+
+
+# --- guard: BOT_AGENT_NOT_REGISTERED ---
+
+@pytest.mark.asyncio
+async def test_tool_guard_unregistered_agent_id():
+    """check_agent_availability con agent_id no registrado retorna BOT_AGENT_NOT_REGISTERED
+    sin hacer ninguna llamada HTTP ni al proveedor."""
+    agency_registry.clear()  # anula el fixture autouse para este caso
+    result = await check_agent_availability.ainvoke(
+        {"agent_id": "agent-no-registrado", "date_from": DATE_FROM, "date_to": DATE_TO}
+    )
+    assert result["slots"] == []
+    assert result["error_code"] is None
+    assert result.get("code") == "BOT_AGENT_NOT_REGISTERED"
+    assert "create_or_get_lead" in result["error"]
