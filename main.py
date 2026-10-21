@@ -36,7 +36,7 @@ from config import TELEGRAM_WEBHOOK_SECRET
 from ai_service import ask_ai  # conservado intacto; ya no se usa en el flujo normal
 from telegram_service import send_message
 from agent.core_langchain import handle_turn
-from agent.observability import flush_traces
+from shared.observability import flush_traces
 from agent.leads import check_lead_modes
 from agent.listing_search import check_listing_search_modes
 import chat_history

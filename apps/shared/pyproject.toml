@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "proptech-shared"
+version = "0.1.0"
+description = "Shared LLM and observability utilities"
+requires-python = ">=3.10"
+dependencies = [
+    "langchain-google-genai>=0.0.10",
+    "langfuse==4.15.4",
+]
+
+[tool.setuptools]
+packages = ["shared"]
+
+[tool.setuptools.package-dir]
+"" = "src"

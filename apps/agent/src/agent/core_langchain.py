@@ -9,11 +9,11 @@ from typing import Optional
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 
 from agent.types import AgentReply, ClientInteraction
-from agent.llm import get_langchain_llm
+from shared.llm import get_langchain_llm
 from agent.tools_langchain import get_tools
 from agent.fakes import FakeConversationStore
 from agent.client_resolver import get_client_resolver_provider
-from agent.observability import get_langfuse_callbacks
+from shared.observability import get_langfuse_callbacks
 
 logger = logging.getLogger("agent.steps")
 

@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import AsyncMock, patch
 
-from agent.observability import get_langfuse_callbacks
+from shared.observability import get_langfuse_callbacks
 from agent.core_langchain import ConversationalAgent
 
 
@@ -82,7 +82,7 @@ async def test_handle_turn_works_when_langfuse_handler_raises(monkeypatch):
         def on_chain_start(self, *a, **kw):
             raise RuntimeError("Langfuse callback explota")
 
-    with patch("agent.observability.get_langfuse_callbacks", return_value=[_BrokenHandler()]):
+    with patch("shared.observability.get_langfuse_callbacks", return_value=[_BrokenHandler()]):
         reply = await agent.handle_turn("chat-99", "telegram", "hola")
 
     # El turno debe responder de forma normal o con el catch-all de "Error:"
