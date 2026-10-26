@@ -357,7 +357,8 @@ async def get_listing_performance(
     and won (leads won), with visit_pct and won_pct of leads computed for you. Covers
     all time and ALL listings, including paused and closed ones. Optional filters:
     operation_type (SALE or RENT) and neighborhood (name, any case or accents). sort_by
-    is views (default), leads, visits or won; highest first. Returns at most 10 listings
+    is views (default), leads, visits or won; highest first. Use sort_by=leads when the
+    user asks about interest or demand; views only when they ask about views. Returns at most 10 listings
     plus totals over every listing that matched."""
     # Validación local: con entrada inválida no se hace ninguna request.
     if operation_type is not None and operation_type.upper() not in ("SALE", "RENT"):

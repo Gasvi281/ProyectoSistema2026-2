@@ -240,3 +240,17 @@ def test_segment_demand_by_neighborhood(monkeypatch):
     assert len(req) == 1 and dict(req[0].url.params) == {"limit": "500"}
     assert "2 barrios; primero Usaquén con 8 leads, 50.0% visita." in body["reply"]
     assert [s["tool"] for s in body["sources"]] == ["segment_demand"]
+
+
+def test_listing_performance_interest_sorts_by_leads(monkeypatch):
+    # El LLM es un script: documenta el ruteo "interés" -> sort_by=leads, no prueba que Gemini lo siga.
+    script = [
+        {"name": "get_listing_performance", "args": {"sort_by": "leads"}},
+        "Orden: {get_listing_performance[order]}; primero "
+        "{get_listing_performance[listings][0][neighborhood]} con "
+        "{get_listing_performance[listings][0][leads]} leads.",
+    ]
+    client, seen = _scripted_client(monkeypatch, script)
+    body = _chat(client, "¿Qué inmuebles generan más interés?").json()
+    assert "Orden: most leads first; primero Usaquén con 8 leads." in body["reply"]
+    assert [s["tool"] for s in body["sources"]] == ["get_listing_performance"]
