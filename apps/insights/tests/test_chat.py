@@ -93,6 +93,16 @@ LOST_REASONS = [
 ]
 
 
+LISTING_PERFORMANCE = [
+    {"listing_id": "00000000-0000-0000-0000-000000000001", "operation_type": "SALE",
+     "city": "Bogotá", "neighborhood": "Usaquén", "property_type": "APARTMENT",
+     "asking_price": "450000000.00", "views": 204, "leads": 8, "visits": 4, "won": 1},
+    {"listing_id": "00000000-0000-0000-0000-000000000002", "operation_type": "RENT",
+     "city": "Bogotá", "neighborhood": "Chapinero", "property_type": "STUDIO",
+     "asking_price": "2500000.00", "views": 90, "leads": 2, "visits": 0, "won": 0},
+]
+
+
 def _scripted_client(monkeypatch, script):
     seen = []
 
@@ -105,6 +115,7 @@ def _scripted_client(monkeypatch, script):
             "/analytics/funnel": FUNNEL,
             "/leads": LEADS,
             "/analytics/lost-reasons": LOST_REASONS,
+            "/analytics/listing-performance": LISTING_PERFORMANCE,
         }
         if request.url.path in routes:
             return httpx.Response(200, json=routes[request.url.path])
@@ -196,3 +207,20 @@ def test_lost_reasons_last_quarter(monkeypatch):
             "params": {"days": 90},
         }
     ]
+
+
+def test_listing_performance_filtered_by_neighborhood(monkeypatch):
+    script = [
+        {"name": "get_listing_performance", "args": {"neighborhood": "usaquen"}},
+        "{get_listing_performance[total_count]} inmueble: "
+        "{get_listing_performance[listings][0][neighborhood]}, "
+        "{get_listing_performance[listings][0][views]} vistas, "
+        "{get_listing_performance[listings][0][visit_pct]}% visita, "
+        "{get_listing_performance[listings][0][asking_price]}.",
+    ]
+    client, seen = _scripted_client(monkeypatch, script)
+    body = _chat(client, "¿Cómo van los inmuebles de Usaquén?").json()
+    req = [r for r in seen if r.url.path == "/analytics/listing-performance"]
+    assert len(req) == 1 and dict(req[0].url.params) == {"limit": "500"}
+    assert "1 inmueble: Usaquén, 204 vistas, 50.0% visita, $450.000.000." in body["reply"]
+    assert [s["tool"] for s in body["sources"]] == ["get_listing_performance"]
