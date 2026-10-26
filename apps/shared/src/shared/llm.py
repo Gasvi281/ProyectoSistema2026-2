@@ -24,8 +24,12 @@ class GeminiLLMProvider:
     """Gemini LLM provider via LangChain."""
     
     @staticmethod
-    def get_gemini_llm():
-        """Get ChatGoogleGenerativeAI instance."""
+    def get_gemini_llm(max_retries: int | None = None, timeout: float | None = None):
+        """Get ChatGoogleGenerativeAI instance.
+
+        max_retries: intentos totales (1 = sin reintentos). timeout: segundos por intento.
+        Si son None se usan los defaults de la librería.
+        """
         try:
             from langchain_google_genai import ChatGoogleGenerativeAI
         except ImportError:
@@ -37,20 +41,31 @@ class GeminiLLMProvider:
         if not api_key:
             raise ValueError("GEMINI_API_KEY o GOOGLE_API_KEY no está configurado")
         
+        extra = {}
+        if max_retries is not None:
+            extra["max_retries"] = max_retries
+        if timeout is not None:
+            extra["timeout"] = timeout
+
         return ChatGoogleGenerativeAI(
             model=model_name,
             google_api_key=api_key,
             #temperature=0.7,
             #max_tokens=512,
+            **extra,
         )
 
-def get_langchain_llm(mode: str | None = None):
+def get_langchain_llm(
+    mode: str | None = None,
+    max_retries: int | None = None,
+    timeout: float | None = None,
+):
     """Get LLM for `mode`; if None, based on AGENT_LLM_MODE."""
     mode = (mode or os.getenv("AGENT_LLM_MODE", "fake")).lower()
 
     if mode == "fake":
         return FakeLLM()
     elif mode == "gemini":
-        return GeminiLLMProvider.get_gemini_llm()
+        return GeminiLLMProvider.get_gemini_llm(max_retries=max_retries, timeout=timeout)
     else:
         raise ValueError(f"Invalid AGENT_LLM_MODE: {mode}")

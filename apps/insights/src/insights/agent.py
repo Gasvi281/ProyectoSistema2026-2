@@ -36,7 +36,15 @@ def get_graph():
     global _graph
     if _graph is None:
         mode = config.llm_mode()
-        llm = FakeInsightsLLM() if mode == "fake" else get_langchain_llm(mode=mode)
+        llm = (
+            FakeInsightsLLM()
+            if mode == "fake"
+            else get_langchain_llm(
+                mode=mode,
+                max_retries=config.llm_max_retries(),
+                timeout=config.llm_timeout(),
+            )
+        )
         # Logger de uvicorn para que salga en su consola sin configurar logging.
         logging.getLogger("uvicorn.error").info(
             "Insights LLM: mode=%s model=%s", mode, getattr(llm, "model", type(llm).__name__)

@@ -1,9 +1,12 @@
 """API de insights (HU-18): solo lectura, para TEAM_ADMIN."""
+import logging
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Request
+import httpx
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from langchain_core.exceptions import ModelError
 from pydantic import BaseModel
 
 from insights import config
@@ -20,6 +23,8 @@ async def lifespan(app: FastAPI):
     # por request bloquearía la respuesta). No-op si el tracing está deshabilitado.
     flush_traces()
 
+
+logger = logging.getLogger("uvicorn.error")
 
 app = FastAPI(title="Homelitics Insights", lifespan=lifespan)
 
@@ -69,5 +74,10 @@ async def chat(req: ChatRequest, authorization: str = Depends(require_team_admin
     auth_header.set(authorization)
     sources.set([])
     conversation_id = req.conversation_id or str(uuid.uuid4())
-    reply = await run_turn(req.message, conversation_id)
+    try:
+        reply = await run_turn(req.message, conversation_id)
+    except (ModelError, httpx.TimeoutException) as e:
+        # Fallo del proveedor LLM (429/503/504, timeout...): 502 como el gate.
+        logger.warning("LLM failure: %s", type(e).__name__)
+        raise HTTPException(status_code=502, detail="Backend unavailable")
     return ChatResponse(reply=reply, conversation_id=conversation_id, sources=sources.get())
