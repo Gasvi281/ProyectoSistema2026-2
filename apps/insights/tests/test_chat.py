@@ -87,6 +87,12 @@ LEADS = [
 ]
 
 
+LOST_REASONS = [
+    {"reason": "PRICE", "leads": 12, "pct": 60.0},
+    {"reason": "FINANCING", "leads": 8, "pct": 40.0},
+]
+
+
 def _scripted_client(monkeypatch, script):
     seen = []
 
@@ -98,6 +104,7 @@ def _scripted_client(monkeypatch, script):
             "/analytics/agent-response-time": RESPONSE_TIMES,
             "/analytics/funnel": FUNNEL,
             "/leads": LEADS,
+            "/analytics/lost-reasons": LOST_REASONS,
         }
         if request.url.path in routes:
             return httpx.Response(200, json=routes[request.url.path])
@@ -168,3 +175,24 @@ def test_agent_open_leads_lists_agents_then_leads(monkeypatch):
     }
     assert "1 abiertos (all open leads): Germán Elías González, $1.372.892." in body["reply"]
     assert [s["tool"] for s in body["sources"]] == ["list_agents", "list_leads"]
+
+
+def test_lost_reasons_last_quarter(monkeypatch):
+    script = [
+        {"name": "get_lost_reasons", "args": {"days": 90}},
+        "{get_lost_reasons[total_lost_with_reason]} perdidos; "
+        "{get_lost_reasons[reasons][0][reason]} {get_lost_reasons[reasons][0][pct]}% "
+        "({get_lost_reasons[period]}).",
+    ]
+    client, seen = _scripted_client(monkeypatch, script)
+    body = _chat(client, "¿Por qué perdimos leads el último trimestre?").json()
+    req = [r for r in seen if r.url.path == "/analytics/lost-reasons"]
+    assert len(req) == 1 and dict(req[0].url.params) == {"days": "90"}
+    assert "20 perdidos; PRICE 60.0% (leads lost in the last 90 days" in body["reply"]
+    assert body["sources"] == [
+        {
+            "tool": "get_lost_reasons",
+            "endpoint": "GET /analytics/lost-reasons",
+            "params": {"days": 90},
+        }
+    ]

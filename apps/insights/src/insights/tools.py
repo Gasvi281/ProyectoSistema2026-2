@@ -273,4 +273,48 @@ async def list_leads(
     return json.dumps(_normalize(data), ensure_ascii=False)
 
 
-TOOLS = [get_north_star, list_agents, get_agent_response_times, get_funnel, list_leads]
+_MAX_DAYS = 730
+
+
+@tool
+async def get_lost_reasons(days: int = _MAX_DAYS) -> str:
+    """Get why leads were lost: lost leads grouped by recorded reason (reason, leads, pct),
+    most common first. The window counts back from TODAY by loss date: days=30 for "last
+    month", 90 for "last quarter", 730 (default, the maximum) for everything on record.
+    The seeded data ends on 2026-08-31, so short windows can come back empty."""
+    # Validación local: con entrada inválida no se hace ninguna request.
+    if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= _MAX_DAYS:
+        return f"Invalid days: it must be an integer between 1 and {_MAX_DAYS}."
+
+    data, error = await _fetch(
+        "get_lost_reasons",
+        "/analytics/lost-reasons",
+        {"days": days},
+        overrides={422: f"Invalid days: it must be an integer between 1 and {_MAX_DAYS}."},
+    )
+    if error:
+        return error
+
+    if days == _MAX_DAYS:
+        period = f"all lost leads on record (last {_MAX_DAYS} days)"
+    else:
+        period = f"leads lost in the last {days} days, counted back from today"
+    return json.dumps(
+        {
+            "period": period,
+            "order": "most lost leads first",
+            "total_lost_with_reason": sum(r["leads"] for r in data),
+            "reasons": data,
+        },
+        ensure_ascii=False,
+    )
+
+
+TOOLS = [
+    get_north_star,
+    list_agents,
+    get_agent_response_times,
+    get_funnel,
+    list_leads,
+    get_lost_reasons,
+]
