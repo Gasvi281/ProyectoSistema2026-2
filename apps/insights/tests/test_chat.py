@@ -224,3 +224,19 @@ def test_listing_performance_filtered_by_neighborhood(monkeypatch):
     assert len(req) == 1 and dict(req[0].url.params) == {"limit": "500"}
     assert "1 inmueble: Usaquén, 204 vistas, 50.0% visita, $450.000.000." in body["reply"]
     assert [s["tool"] for s in body["sources"]] == ["get_listing_performance"]
+
+
+def test_segment_demand_by_neighborhood(monkeypatch):
+    script = [
+        {"name": "segment_demand", "args": {"by": "neighborhood"}},
+        "{segment_demand[total_segments]} barrios; primero "
+        "{segment_demand[segments][0][segment]} con "
+        "{segment_demand[segments][0][leads]} leads, "
+        "{segment_demand[segments][0][visit_pct]}% visita.",
+    ]
+    client, seen = _scripted_client(monkeypatch, script)
+    body = _chat(client, "¿En qué barrios hay más demanda?").json()
+    req = [r for r in seen if r.url.path == "/analytics/listing-performance"]
+    assert len(req) == 1 and dict(req[0].url.params) == {"limit": "500"}
+    assert "2 barrios; primero Usaquén con 8 leads, 50.0% visita." in body["reply"]
+    assert [s["tool"] for s in body["sources"]] == ["segment_demand"]

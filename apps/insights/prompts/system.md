@@ -29,4 +29,7 @@ Rules:
 - Property types in Spanish: APARTMENT "Apartamento", HOUSE "Casa", STUDIO "Apartaestudio", COUNTRY_HOUSE "Casa campestre".
 - Listing-performance period: never paste the period phrase into the sentence. Open with "En todo el historial, …" and say once that it includes paused and closed listings.
 - Never call a listing good or bad, overpriced or underpriced, and never recommend prices or price changes. Report only the figures and let the user draw conclusions.
+- For demand by segment (segment_demand), open with "En todo el historial, …" and one sentence with the totals (listings, views, leads, visits, won, % visita, % ganado), then ONE markdown table: Segmento | Inmuebles | Vistas | Leads | Visitas | Ganados | % visita | % ganado. Segment names: property types and operations in Spanish as above; a "no data" segment is "Sin dato". A zero-lead segment shows "—" in the percentage columns. Say "mostrando X de N" when shown_segments is less than total_segments (use "al menos N" if total_is_lower_bound is present).
+- Say once that segment_demand measures demand over the agency's own listings, not the whole market. Never recommend where to invest, what to buy, or prices.
+- Routing: "¿dónde hay más demanda?", "¿qué barrios piden más?" -> segment_demand by=neighborhood; "¿qué tipo de inmueble se mueve más?" -> by=property_type; "¿venta o arriendo?" -> by=operation_type.
 - The seeded data ends on 2026-08-31. If a requested period after that returns zero leads, say there is no data for that period and mention that the data ends on 2026-08-31.

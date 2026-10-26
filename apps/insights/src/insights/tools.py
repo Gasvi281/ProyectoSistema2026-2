@@ -404,6 +404,80 @@ async def get_listing_performance(
     return json.dumps(_normalize(data), ensure_ascii=False)
 
 
+_SEGMENT_BY = ("neighborhood", "operation_type", "property_type")
+_SEGMENT_CAP = 15
+
+
+@tool
+async def segment_demand(by: str, operation_type: str | None = None) -> str:
+    """Get demand grouped into segments: by is neighborhood, operation_type or
+    property_type. Per segment: listings, views, leads, visits (leads that reached a
+    visit) and won (leads won), with visit_pct and won_pct of leads computed for you.
+    Covers all time and ALL the agency's listings, including paused and closed ones.
+    Optional operation_type filter (SALE or RENT), not allowed with by=operation_type.
+    Ordered by most leads first; returns at most 15 segments plus totals over all."""
+    # Validación local: con entrada inválida no se hace ninguna request.
+    if by.lower() not in _SEGMENT_BY:
+        return "Invalid by: it must be one of " + ", ".join(_SEGMENT_BY) + "."
+    by = by.lower()
+    if operation_type is not None and operation_type.upper() not in ("SALE", "RENT"):
+        return "Invalid operation_type: it must be SALE or RENT."
+    if operation_type is not None and by == "operation_type":
+        return "Invalid operation_type: it cannot be combined with by=operation_type."
+
+    raw, error = await _listing_performance("segment_demand")
+    if error:
+        return error
+
+    rows = raw
+    if operation_type:
+        rows = [r for r in rows if r["operation_type"] == operation_type.upper()]
+
+    # Agrupa por la clave plegada (sin tildes ni mayúsculas). _fetch ya convirtió null
+    # en NO_DATA; null, vacío y NO_DATA van a un solo grupo.
+    groups: dict[str | None, list] = {}
+    for r in rows:
+        value = (r.get(by) or "").strip()
+        key = _fold(value) if value and value != NO_DATA else None
+        groups.setdefault(key, []).append(r)
+
+    segments = []
+    for key, members in groups.items():
+        if key is None:
+            name = NO_DATA
+        else:
+            counts: dict[str, int] = {}
+            for r in members:
+                spelling = r[by].strip()
+                counts[spelling] = counts.get(spelling, 0) + 1
+            # Grafía más frecuente; empate -> alfabética (no depende del orden del backend).
+            name = min(counts, key=lambda s: (-counts[s], s))
+        segments.append(
+            {
+                "segment": name,
+                "listings": len(members),
+                **_rates(*(sum(r[f] for r in members) for f in _SORT_FIELDS)),
+            }
+        )
+
+    ordered = sorted(segments, key=lambda g: (-g["leads"], g["segment"]))[:_SEGMENT_CAP]
+    data = {
+        "period": _PERF_PERIOD,
+        "by": by,
+        "order": "most leads first",
+        "total_segments": len(segments),
+        "shown_segments": len(ordered),
+        "totals": {
+            "listings": len(rows),
+            **_rates(*(sum(r[f] for r in rows) for f in _SORT_FIELDS)),
+        },
+        "segments": ordered,
+    }
+    if len(raw) == _PERF_LIMIT:
+        data["total_is_lower_bound"] = True
+    return json.dumps(_normalize(data), ensure_ascii=False)
+
+
 TOOLS = [
     get_north_star,
     list_agents,
@@ -412,4 +486,5 @@ TOOLS = [
     list_leads,
     get_lost_reasons,
     get_listing_performance,
+    segment_demand,
 ]
