@@ -44,10 +44,10 @@ class GeminiLLMProvider:
             #max_tokens=512,
         )
 
-def get_langchain_llm():
-    """Get LLM based on AGENT_LLM_MODE."""
-    mode = os.getenv("AGENT_LLM_MODE", "fake").lower()
-    
+def get_langchain_llm(mode: str | None = None):
+    """Get LLM for `mode`; if None, based on AGENT_LLM_MODE."""
+    mode = (mode or os.getenv("AGENT_LLM_MODE", "fake")).lower()
+
     if mode == "fake":
         return FakeLLM()
     elif mode == "gemini":
