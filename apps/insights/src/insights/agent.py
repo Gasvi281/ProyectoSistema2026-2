@@ -58,6 +58,10 @@ async def run_turn(message: str, conversation_id: str) -> str:
     callbacks = get_langfuse_callbacks()
     if callbacks:
         run_config["callbacks"] = callbacks
+        run_config["metadata"] = {
+            "langfuse_session_id": conversation_id,
+            "langfuse_trace_name": "insights.chat",
+        }
     result = await get_graph().ainvoke(
         {"messages": [HumanMessage(content=message)]}, config=run_config
     )

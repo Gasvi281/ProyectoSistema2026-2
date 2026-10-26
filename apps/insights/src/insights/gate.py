@@ -4,6 +4,7 @@ from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from insights.backend import backend_get
+from shared.observability import trace_span
 
 # auto_error=False: sin header respondemos 401 nosotros (HTTPBearer daría 403).
 _bearer = HTTPBearer(auto_error=False)
@@ -18,7 +19,8 @@ async def require_team_admin(
     authorization = f"Bearer {credentials.credentials}"
 
     try:
-        resp = await backend_get("/me", authorization=authorization)
+        with trace_span("gate.me"):
+            resp = await backend_get("/me", authorization=authorization)
     except httpx.RequestError:
         raise HTTPException(status_code=502, detail="Backend unavailable")
 

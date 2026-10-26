@@ -1,7 +1,8 @@
 """API de insights (HU-18): solo lectura, para TEAM_ADMIN."""
 import uuid
+from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -9,8 +10,28 @@ from insights import config
 from insights.agent import run_turn
 from insights.context import auth_header, sources
 from insights.gate import require_team_admin
+from shared.observability import flush_traces, trace_span
 
-app = FastAPI(title="Homelitics Insights")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    # Vaciar trazas pendientes de Langfuse al apagar (no por request: un flush
+    # por request bloquearía la respuesta). No-op si el tracing está deshabilitado.
+    flush_traces()
+
+
+app = FastAPI(title="Homelitics Insights", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def trace_chat(request: Request, call_next):
+    # Un trace por chat: el span raíz envuelve el gate y el run de LangGraph.
+    # Match exacto: /health, /docs y los preflight OPTIONS no abren span.
+    if request.method == "POST" and request.url.path == "/insights/chat":
+        with trace_span("insights.chat"):
+            return await call_next(request)
+    return await call_next(request)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=config.cors_origins(),
