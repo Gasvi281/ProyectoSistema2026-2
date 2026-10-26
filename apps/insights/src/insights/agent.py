@@ -1,4 +1,5 @@
 """Agente tool-calling de insights (LangGraph ReAct, mismo patrón que el bot)."""
+import logging
 from pathlib import Path
 
 from langgraph.checkpoint.memory import MemorySaver
@@ -22,17 +23,25 @@ def _tool_error_to_message(e: Exception) -> str:
     )
 
 
+def build_graph(llm):
+    return create_react_agent(
+        llm,
+        ToolNode(TOOLS, handle_tool_errors=_tool_error_to_message),
+        prompt=_PROMPT_PATH.read_text(encoding="utf-8"),
+        checkpointer=MemorySaver(),
+    )
+
+
 def get_graph():
     global _graph
     if _graph is None:
         mode = config.llm_mode()
         llm = FakeInsightsLLM() if mode == "fake" else get_langchain_llm(mode=mode)
-        _graph = create_react_agent(
-            llm,
-            ToolNode(TOOLS, handle_tool_errors=_tool_error_to_message),
-            prompt=_PROMPT_PATH.read_text(encoding="utf-8"),
-            checkpointer=MemorySaver(),
+        # Logger de uvicorn para que salga en su consola sin configurar logging.
+        logging.getLogger("uvicorn.error").info(
+            "Insights LLM: mode=%s model=%s", mode, getattr(llm, "model", type(llm).__name__)
         )
+        _graph = build_graph(llm)
     return _graph
 
 

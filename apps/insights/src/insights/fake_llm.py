@@ -7,7 +7,15 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 
 
 class FakeInsightsLLM(BaseChatModel):
-    """Llama get_north_star una vez por turno y responde con lo que devolvió."""
+    """Sin script: llama get_north_star una vez por turno y responde con lo que devolvió.
+
+    Con script: lista de pasos, cada uno {"name", "args"} (tool call) o un str
+    (respuesta final). El script se reproduce desde el inicio en cada turno.
+    Un str se rellena con str.format_map sobre {nombre_tool: resultado_json}, p. ej.
+    "{get_agent_response_times[agents][0][agent_name]}".
+    """
+
+    script: list | None = None
 
     @property
     def _llm_type(self) -> str:
@@ -19,16 +27,41 @@ class FakeInsightsLLM(BaseChatModel):
     def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
         # Mensajes del turno actual: los posteriores al último HumanMessage.
         last_human = max(i for i, m in enumerate(messages) if isinstance(m, HumanMessage))
-        tool_results = [m for m in messages[last_human + 1 :] if isinstance(m, ToolMessage)]
+        turn = messages[last_human + 1 :]
 
-        if not tool_results:
-            msg = AIMessage(
-                content="",
-                tool_calls=[{"name": "get_north_star", "args": {}, "id": "call_north_star"}],
-            )
+        if self.script is not None:
+            msg = self._scripted(turn)
         else:
-            msg = AIMessage(content=self._answer(str(tool_results[-1].content)))
+            tool_results = [m for m in turn if isinstance(m, ToolMessage)]
+            if not tool_results:
+                msg = self._tool_call_message("get_north_star", {}, 0)
+            else:
+                msg = AIMessage(content=self._answer(str(tool_results[-1].content)))
         return ChatResult(generations=[ChatGeneration(message=msg)])
+
+    @staticmethod
+    def _tool_call_message(name: str, args: dict, step: int) -> AIMessage:
+        return AIMessage(
+            content="", tool_calls=[{"name": name, "args": args, "id": f"call_{step}_{name}"}]
+        )
+
+    def _scripted(self, turn: list) -> AIMessage:
+        # El paso actual = cuántos AIMessage ya produjo el modelo en este turno.
+        step = sum(isinstance(m, AIMessage) for m in turn)
+        if step >= len(self.script):
+            raise ValueError(f"FakeInsightsLLM: script agotado en el paso {step}")
+        item = self.script[step]
+        if isinstance(item, dict):
+            return self._tool_call_message(item["name"], item.get("args", {}), step)
+
+        results = {}
+        for m in turn:
+            if isinstance(m, ToolMessage):
+                try:
+                    results[m.name] = json.loads(str(m.content))
+                except ValueError:
+                    results[m.name] = str(m.content)
+        return AIMessage(content=item.format_map(results))
 
     @staticmethod
     def _answer(tool_content: str) -> str:
