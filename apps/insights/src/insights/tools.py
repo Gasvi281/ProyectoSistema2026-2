@@ -2,7 +2,9 @@
 import json
 import re
 import uuid
-from datetime import date
+from datetime import date, datetime
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from zoneinfo import ZoneInfo
 
 import httpx
 from langchain_core.tools import tool
@@ -159,4 +161,116 @@ async def get_funnel(
     return json.dumps(data, ensure_ascii=False)
 
 
-TOOLS = [get_north_star, list_agents, get_agent_response_times, get_funnel]
+_OPEN_STAGES = ("INTERESTED", "VISIT_SCHEDULED", "VISITED", "NEGOTIATING")
+_ROW_CAP = 10
+_BOARD_LIMIT = 200
+# created_from/created_to del backend son días en la zona de la agencia.
+_AGENCY_TZ = ZoneInfo("America/Bogota")
+
+
+def _format_cop(price) -> str:
+    """"1372892.26" -> "$1.372.892" (pesos enteros, punto de miles)."""
+    try:
+        pesos = Decimal(str(price)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError):
+        return NO_DATA
+    return "$" + f"{pesos:,}".replace(",", ".")
+
+
+def _created_on(created_at: str) -> str:
+    moment = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    return moment.astimezone(_AGENCY_TZ).date().isoformat()
+
+
+@tool
+async def list_leads(
+    agent_id: str | None = None,
+    stage: str | None = None,
+    created_from: str | None = None,
+    created_to: str | None = None,
+) -> str:
+    """List the agency's OPEN leads (WON and LOST excluded): client name, neighborhood,
+    operation type, asking price, stage and creation date, oldest created first. Use it
+    for questions about current/open leads of the agency or of one agent. Optional
+    filters: agent_id (UUID from list_agents), stage (INTERESTED, VISIT_SCHEDULED,
+    VISITED or NEGOTIATING), created_from and created_to (YYYY-MM-DD, inclusive).
+    Returns at most 10 rows, plus total_count and by_stage counts over all open leads
+    that matched."""
+    # Validación local: con entrada inválida no se hace ninguna request.
+    if agent_id is not None:
+        try:
+            uuid.UUID(agent_id)
+        except ValueError:
+            return "Invalid agent_id: it must be a UUID returned by list_agents."
+    for name, value in (("created_from", created_from), ("created_to", created_to)):
+        if value is not None and not _valid_date(value):
+            return f"Invalid {name}: use the format YYYY-MM-DD."
+    if stage is not None and stage.upper() not in _OPEN_STAGES:
+        return "Invalid stage: only open stages are listed (" + ", ".join(_OPEN_STAGES) + ")."
+
+    params = {"active": True, "limit": _BOARD_LIMIT, "offset": 0}
+    params.update(
+        (k, v)
+        for k, v in {
+            "agent_id": agent_id,
+            "stage": stage.upper() if stage else None,
+            "created_from": created_from,
+            "created_to": created_to,
+        }.items()
+        if v is not None
+    )
+    cards, error = await _fetch(
+        "list_leads",
+        "/leads",
+        params,
+        overrides={422: "Invalid date range: created_from is after created_to."},
+    )
+    if error:
+        return error
+
+    names = None
+    if agent_id is None:
+        # Sin active=True: los leads de agentes desactivados también llevan nombre.
+        agents, agents_error = await _fetch(
+            "list_leads", "/agents", {"include_bots": False, "limit": 200}
+        )
+        names = {} if agents_error else {a["id"]: a["full_name"] for a in agents}
+
+    # Conteos y orden se calculan en código sobre todos los leads, antes del tope.
+    # Siempre las cuatro etapas abiertas, con 0 donde no hubo leads.
+    by_stage = {s: sum(1 for c in cards if c["current_stage"] == s) for s in _OPEN_STAGES}
+    ordered = sorted(cards, key=lambda c: c["created_at"])[:_ROW_CAP]
+    rows = []
+    for c in ordered:
+        row = {
+            "client_name": c.get("client_name"),
+            "neighborhood": c.get("neighborhood"),
+            "operation_type": c.get("operation_type"),
+            "asking_price": _format_cop(c.get("asking_price")),
+            "stage": c["current_stage"],
+            "created_on": _created_on(c["created_at"]),
+        }
+        if names is not None:
+            row["agent_name"] = names.get(c["agent_id"])
+        rows.append(row)
+
+    if created_from or created_to:
+        period = (
+            f"open leads created {created_from or '(no start)'} to {created_to or '(no end)'}"
+        )
+    else:
+        period = "all open leads"
+    data = {
+        "period": period,
+        "order": "oldest created first",
+        "total_count": len(cards),
+        "shown_count": len(rows),
+        "by_stage": by_stage,
+        "leads": rows,
+    }
+    if len(cards) == _BOARD_LIMIT:
+        data["total_is_lower_bound"] = True
+    return json.dumps(_normalize(data), ensure_ascii=False)
+
+
+TOOLS = [get_north_star, list_agents, get_agent_response_times, get_funnel, list_leads]

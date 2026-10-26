@@ -14,6 +14,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "langgraph>=0.2.0",
     "langchain-core>=1.0",
+    "tzdata>=2024.1",
     "proptech-shared",
 ]
 

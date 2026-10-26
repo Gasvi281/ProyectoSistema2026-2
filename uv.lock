@@ -1109,6 +1109,7 @@ dependencies = [
     { name = "langgraph" },
     { name = "proptech-shared" },
     { name = "python-dotenv" },
+    { name = "tzdata" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -1126,6 +1127,7 @@ requires-dist = [
     { name = "langgraph", specifier = ">=0.2.0" },
     { name = "proptech-shared", editable = "apps/shared" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
+    { name = "tzdata", specifier = ">=2024.1" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30.6" },
 ]
 

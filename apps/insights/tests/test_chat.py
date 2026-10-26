@@ -80,6 +80,13 @@ FUNNEL = {
 }
 
 
+LEADS = [
+    {"id": "l1", "agent_id": INES_ID, "current_stage": "VISITED",
+     "created_at": "2026-08-05T15:00:00Z", "client_name": "Germán Elías González",
+     "neighborhood": "Chapinero", "operation_type": "SALE", "asking_price": "1372892.26"},
+]
+
+
 def _scripted_client(monkeypatch, script):
     seen = []
 
@@ -90,6 +97,7 @@ def _scripted_client(monkeypatch, script):
             "/agents": AGENTS,
             "/analytics/agent-response-time": RESPONSE_TIMES,
             "/analytics/funnel": FUNNEL,
+            "/leads": LEADS,
         }
         if request.url.path in routes:
             return httpx.Response(200, json=routes[request.url.path])
@@ -142,3 +150,21 @@ def test_ambiguous_name_does_not_call_funnel(monkeypatch):
     assert not [r for r in seen if r.url.path == "/analytics/funnel"]
     assert "Carlos Pérez" in body["reply"] and "Carlos Ruiz" in body["reply"]
     assert [s["tool"] for s in body["sources"]] == ["list_agents"]
+
+
+def test_agent_open_leads_lists_agents_then_leads(monkeypatch):
+    script = [
+        {"name": "list_agents", "args": {}},
+        {"name": "list_leads", "args": {"agent_id": INES_ID}},
+        "{list_leads[total_count]} abiertos ({list_leads[period]}): "
+        "{list_leads[leads][0][client_name]}, {list_leads[leads][0][asking_price]}.",
+    ]
+    client, seen = _scripted_client(monkeypatch, script)
+    body = _chat(client, "¿Qué leads abiertos tiene Inés?").json()
+    leads_req = [r for r in seen if r.url.path == "/leads"]
+    assert len(leads_req) == 1
+    assert dict(leads_req[0].url.params) == {
+        "active": "true", "limit": "200", "offset": "0", "agent_id": INES_ID,
+    }
+    assert "1 abiertos (all open leads): Germán Elías González, $1.372.892." in body["reply"]
+    assert [s["tool"] for s in body["sources"]] == ["list_agents", "list_leads"]
