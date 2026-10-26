@@ -153,3 +153,41 @@ async def test_failures_leave_sources_empty(monkeypatch, seen, tool):
     _use(monkeypatch, seen, httpx.ConnectError("down"))
     assert "unavailable" in await tool.ainvoke({})
     assert sources.get() == []
+
+
+def test_normalize_rounds_floats_and_keeps_the_rest():
+    from insights.tools import _normalize
+
+    out = _normalize(
+        {
+            "median": 31.3372382241667,
+            "leads": 7,
+            "flag": True,
+            "missing": None,
+            "label": "no data",
+            "nested": [{"pct": 33.333333, "n": 2}],
+        }
+    )
+    assert out == {
+        "median": 31.34,
+        "leads": 7,
+        "flag": True,
+        "missing": "no data",
+        "label": "no data",
+        "nested": [{"pct": 33.33, "n": 2}],
+    }
+    assert isinstance(out["leads"], int) and out["flag"] is True
+
+
+async def test_response_times_rounds_hours(monkeypatch, seen):
+    rows = [
+        {"agent_id": "a1", "agent_name": "Inés", "leads": 5,
+         "avg_first_response_hours": 40.987654321,
+         "median_first_response_hours": 31.3372382241667, "never_answered": 1},
+    ]
+    _use(monkeypatch, seen, httpx.Response(200, json=rows))
+    out = json.loads(await get_agent_response_times.ainvoke({}))
+    assert out["period"] == "full history (no date filter)"
+    assert out["agents"][0]["median_first_response_hours"] == 31.34
+    assert out["agents"][0]["avg_first_response_hours"] == 40.99
+    assert out["agents"][0]["leads"] == 5

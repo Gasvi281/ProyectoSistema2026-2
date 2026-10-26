@@ -15,13 +15,16 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _UNAVAILABLE = "The backend is unavailable right now. Tell the user to try again later."
 
 
-def _nulls_to_no_data(value):
+def _normalize(value):
+    """null -> "no data" y floats a 2 decimales (el modelo cita las cifras tal cual)."""
     if value is None:
         return NO_DATA
+    if isinstance(value, float):
+        return round(value, 2)
     if isinstance(value, dict):
-        return {k: _nulls_to_no_data(v) for k, v in value.items()}
+        return {k: _normalize(v) for k, v in value.items()}
     if isinstance(value, list):
-        return [_nulls_to_no_data(v) for v in value]
+        return [_normalize(v) for v in value]
     return value
 
 
@@ -51,7 +54,7 @@ async def _fetch(
     sources.get().append(
         {"tool": tool_name, "endpoint": f"GET {path}", "params": params or {}}
     )
-    return _nulls_to_no_data(resp.json()), None
+    return _normalize(resp.json()), None
 
 
 @tool
