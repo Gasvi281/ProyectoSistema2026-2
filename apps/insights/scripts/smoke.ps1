@@ -8,7 +8,7 @@ Uso (desde cualquier carpeta, con uvicorn corriendo en otra terminal):
 No imprime el token: solo su longitud y prefijo.
 #>
 param(
-    [int]$Port = 3001,
+    [int]$Port = 8001,
     [string]$Message = "How is the agency doing?"
 )
 
