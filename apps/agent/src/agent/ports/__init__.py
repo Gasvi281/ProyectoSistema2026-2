@@ -97,3 +97,20 @@ class ListingAgencyResolverPort(ABC):
         Lanza UnknownListingError si el listing no está mapeado a ninguna
         agencia conocida (nunca retorna None ni un default silencioso)."""
         pass
+
+class ListingSearchPort(ABC):
+    """Busca propiedades en el catálogo (fake o backend real).
+
+    Scope: solo propiedades de la agencia del bot (intra-agencia).
+    Limitación conocida (alcance MVP): el backend no tiene endpoint cross-agency.
+    """
+    @abstractmethod
+    async def search(self, filters: SearchFilters, limit: int = 5) -> list[Property]:
+        """Retorna las propiedades que satisfacen los filtros, ordenadas más reciente primero.
+        Retorna lista vacía si no hay coincidencias — nunca None ni lanza."""
+        pass
+
+    @abstractmethod
+    async def get_listing(self, listing_id: str) -> Optional[Property]:
+        """Retorna la propiedad o None si no existe / está fuera de la agencia."""
+        pass

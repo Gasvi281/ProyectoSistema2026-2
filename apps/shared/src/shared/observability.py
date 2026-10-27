@@ -7,6 +7,8 @@ flush se traga aquí y nunca sube a handle_turn.
 """
 import logging
 import os
+import sys
+from contextlib import contextmanager
 
 logger = logging.getLogger("agent.observability")
 
@@ -47,3 +49,31 @@ def flush_traces() -> None:
         get_client().flush()
     except Exception:
         logger.warning("Langfuse flush falló", exc_info=True)
+
+
+@contextmanager
+def trace_span(name: str):
+    """Abre un span de Langfuse como span OTel actual (los hijos se anidan en él).
+
+    No-op sin keys y fail-open: un error del SDK al abrir o cerrar se registra
+    y se ignora; nunca oculta la excepción del cuerpo.
+    """
+    if not _tracing_enabled():
+        yield None
+        return
+    try:
+        from langfuse import get_client
+
+        cm = get_client().start_as_current_observation(name=name, as_type="span")
+        span = cm.__enter__()
+    except Exception:
+        logger.warning("Langfuse span %s deshabilitado", name, exc_info=True)
+        yield None
+        return
+    try:
+        yield span
+    finally:
+        try:
+            cm.__exit__(*sys.exc_info())
+        except Exception:
+            logger.warning("Langfuse span %s no se pudo cerrar", name, exc_info=True)

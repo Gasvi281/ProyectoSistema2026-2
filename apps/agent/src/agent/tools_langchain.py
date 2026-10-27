@@ -1,19 +1,21 @@
 """LangChain tools for property search, Q&A, availability, scheduling."""
 import logging
+import re
 from typing import Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from langchain.tools import tool
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
 class SearchInput(BaseModel):
-    location: Optional[str] = Field(None, description="City or neighborhood")
-    min_price: Optional[int] = Field(None, description="Min price in COP")
-    max_price: Optional[int] = Field(None, description="Max price in COP")
-    min_bedrooms: Optional[int] = Field(None, description="Min bedrooms")
-    max_bedrooms: Optional[int] = Field(None, description="Max bedrooms")
-    property_type: Optional[str] = Field(None, description="apartment, house, or commercial")
+    location: Optional[str] = Field(None, description="Ciudad o barrio (ej. 'Laureles', 'Medellín')")
+    min_price: Optional[int] = Field(None, description="Precio mínimo en COP")
+    max_price: Optional[int] = Field(None, description="Precio máximo en COP")
+    min_bedrooms: Optional[int] = Field(None, description="Número mínimo de habitaciones")
+    max_bedrooms: Optional[int] = Field(None, description="Número máximo de habitaciones")
+    property_type: Optional[str] = Field(None, description="Tipo de inmueble: APARTMENT, HOUSE, STUDIO, COUNTRY_HOUSE")
+    operation_type: Optional[str] = Field(None, description="Operación: SALE (comprar/venta) o RENT (arrendar/arriendo)")
 
 class PropertyQAInput(BaseModel):
     property_id: str = Field(..., description="Property ID")
@@ -33,10 +35,45 @@ class LikePropertyInput(BaseModel):
     client_id: str = Field(..., description="Client ID")
     property_id: str = Field(..., description="Property ID")
 
+_UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+    re.IGNORECASE,
+)
+
+
 class RequestVisitInput(BaseModel):
     client_id: str = Field(..., description="Client ID — usa el que aparece al inicio del mensaje del sistema, nunca lo inventes")
-    property_description: str = Field(..., description="Descripción del inmueble en las propias palabras del cliente (ubicación, tipo, lo que haya mencionado)")
-    preferred_datetime: str = Field(..., description="Fecha/hora preferida tal como la expresó el cliente (puede ser texto libre, ej. 'mañana en la tarde')")
+    property_description: str = Field(
+        ...,
+        description=(
+            "Descripción del inmueble en las propias palabras del cliente "
+            "(ubicación, tipo, lo que haya mencionado). "
+            "NO incluyas un UUID aquí — si tienes un listing_id real, usa el flujo "
+            "create_or_get_lead → check_agent_availability → book_appointment."
+        ),
+    )
+    preferred_datetime: Optional[datetime] = Field(
+        None,
+        description=(
+            "Fecha y hora preferida en formato ISO 8601 con zona horaria "
+            "(ej. '2026-09-10T14:00:00-05:00'). "
+            "Pasa None cuando el cliente sea flexible o diga 'lo antes posible' — "
+            "NUNCA inventes una fecha ni uses texto libre."
+        ),
+    )
+
+    @field_validator("property_description")
+    @classmethod
+    def no_uuid_in_description(cls, v: str) -> str:
+        if _UUID_RE.search(v):
+            raise ValueError(
+                "property_description contiene un UUID. "
+                "Si tienes un listing_id real, usa el flujo estructurado: "
+                "create_or_get_lead(client_id, listing_id) → "
+                "check_agent_availability → book_appointment. "
+                "request_visit es solo para cuando NO tienes un listing_id."
+            )
+        return v
 
 class AgentAvailabilityInput(BaseModel):
     agent_id: str = Field(..., description="ID del agente inmobiliario cuya disponibilidad se quiere consultar")
@@ -50,55 +87,147 @@ class CreateLeadInput(BaseModel):
 class BookAppointmentInput(BaseModel):
     lead_id: str = Field(..., description="ID del lead/cliente — usa el que aparece al inicio del mensaje del sistema, nunca lo inventes")
     scheduled_at: str = Field(..., description="Fecha/hora del slot elegido — ISO 8601 con zona horaria, ej. '2026-09-10T09:00:00+00:00'. Debe ser un slot real obtenido de check_agent_availability, nunca inventado")
-    duration_min: int = Field(60, description="Duración de la visita en minutos (default 60)")
+    duration_min: int = Field(30, description="Duración de la visita en minutos (default 30, igual a slot_minutes del backend)")
     agent_id: Optional[str] = Field(None, description="ID del agente inmobiliario — obtenido de create_or_get_lead; requerido para proponer alternativas si el slot no está disponible")
 
 @tool(args_schema=SearchInput)
-def search_properties(location=None, min_price=None, max_price=None, min_bedrooms=None, max_bedrooms=None, property_type=None):
-    """Search property catalog. Grounding: returns no-matches message if empty, never invents."""
-    from agent.fakes import FakeCatalog
+async def search_properties(location=None, min_price=None, max_price=None, min_bedrooms=None, max_bedrooms=None, property_type=None, operation_type=None):
+    """Busca propiedades en el catálogo usando lenguaje natural.
+
+    Devuelve un dict con:
+    - `results`: lista de propiedades con sus `id` internos (úsalos en create_or_get_lead).
+    - `summary`: lista numerada legible para el cliente — SIN UUIDs.
+    - `count`: 0 si no hay coincidencias — NUNCA inventes propiedades.
+
+    Cuando el cliente elija una propiedad (por número o nombre), resuelve su `id`
+    desde `results` y pásalo a create_or_get_lead. Nunca muestres ni inventes el `id`."""
+    import httpx
     from agent.types import SearchFilters
-    
-    catalog = FakeCatalog()
-    filters = SearchFilters(location=location, min_price=min_price, max_price=max_price, min_bedrooms=min_bedrooms, max_bedrooms=max_bedrooms, property_type=property_type)
-    results = catalog.properties.values()
-    
-    filtered = []
-    for prop in results:
-        if location and prop.location.lower() != location.lower(): continue
-        if min_price and prop.price < min_price: continue
-        if max_price and prop.price > max_price: continue
-        if min_bedrooms and prop.bedrooms < min_bedrooms: continue
-        if max_bedrooms and prop.bedrooms > max_bedrooms: continue
-        if property_type and prop.property_type != property_type: continue
-        filtered.append(prop)
-    
-    if not filtered:
-        return "No properties match. Try adjusting budget, location, or rooms."
-    
-    result_text = f"Found {len(filtered[:5])} properties:\n"
-    for prop in filtered[:5]:
-        result_text += f"- {prop.name} ({prop.location}): ${prop.price:,} | {prop.bedrooms}bed {prop.bathrooms}bath | ID:{prop.id}\n"
-    return result_text
+    from agent.listing_search import get_listing_search_provider
+
+    provider = get_listing_search_provider()
+    filters = SearchFilters(
+        location=location,
+        min_price=min_price,
+        max_price=max_price,
+        min_bedrooms=min_bedrooms,
+        max_bedrooms=max_bedrooms,
+        property_type=property_type,
+        operation_type=operation_type,
+    )
+
+    try:
+        props = await provider.search(filters, limit=5)
+    except httpx.HTTPStatusError as e:
+        http_code = e.response.status_code
+        if http_code in (400, 401, 403):
+            return {
+                "results": [], "count": 0, "summary": "",
+                "error": f"Error de autenticación ({http_code}) al buscar propiedades.",
+                "error_code": http_code, "code": "BACKEND_AUTH_ERROR",
+            }
+        return {
+            "results": [], "count": 0, "summary": "",
+            "error": f"Error del servidor ({http_code}) al buscar propiedades.",
+            "error_code": http_code, "code": "BACKEND_UNAVAILABLE",
+        }
+    except httpx.TransportError as e:
+        return {
+            "results": [], "count": 0, "summary": "",
+            "error": str(e), "error_code": None, "code": "BACKEND_UNAVAILABLE",
+        }
+    except Exception as e:
+        return {
+            "results": [], "count": 0, "summary": "",
+            "error": str(e), "error_code": None,
+        }
+
+    if not props:
+        return {"results": [], "count": 0, "summary": "", "error": None, "error_code": None}
+
+    _op_es = {"SALE": "venta", "RENT": "arriendo"}
+    results = []
+    summary_lines = []
+    for n, prop in enumerate(props, 1):
+        op_label = _op_es.get(prop.operation_type or "", prop.operation_type or "")
+        results.append({
+            "n": n,
+            "id": prop.id,
+            "name": prop.name,
+            "location": prop.location,
+            "price": prop.price,
+            "bedrooms": prop.bedrooms,
+            "operation_type": prop.operation_type,
+        })
+        line = f"{n}. {prop.name} — {prop.location} — ${prop.price:,} COP — {prop.bedrooms} hab"
+        if op_label:
+            line += f" — {op_label}"
+        summary_lines.append(line)
+
+    return {
+        "results": results,
+        "count": len(results),
+        "summary": "\n".join(summary_lines),
+        "error": None,
+        "error_code": None,
+    }
 
 @tool(args_schema=PropertyQAInput)
-def answer_property_question(property_id, question):
-    """Answer facts about a property from record only. No hallucination."""
-    from agent.fakes import FakeCatalog
-    catalog = FakeCatalog()
-    prop = catalog.properties.get(property_id)
-    if not prop:
-        return f"Property {property_id} not found."
-    
+async def answer_property_question(property_id, question):
+    """Responde preguntas sobre una propiedad del catálogo.
+
+    Usa el `id` de los `results` de search_properties — nunca un UUID inventado.
+    Solo cita datos del registro; admite cuando la información no está disponible.
+    Retorna un dict con `answer` en éxito, o `code` en error."""
+    import httpx
+    from agent.listing_search import get_listing_search_provider
+
+    provider = get_listing_search_provider()
+
+    try:
+        prop = await provider.get_listing(property_id)
+    except httpx.HTTPStatusError as e:
+        http_code = e.response.status_code
+        if http_code in (400, 401, 403):
+            return {"answer": None, "error": f"Error de autenticación ({http_code}).", "error_code": http_code, "code": "BACKEND_AUTH_ERROR"}
+        return {"answer": None, "error": f"Error del servidor ({http_code}).", "error_code": http_code, "code": "BACKEND_UNAVAILABLE"}
+    except httpx.TransportError as e:
+        return {"answer": None, "error": str(e), "error_code": None, "code": "BACKEND_UNAVAILABLE"}
+    except Exception as e:
+        return {"answer": None, "error": str(e), "error_code": None}
+
+    if prop is None:
+        return {
+            "answer": None,
+            "error": f"La propiedad {property_id!r} no fue encontrada o no está disponible.",
+            "error_code": None,
+            "code": "UNKNOWN_LISTING",
+        }
+
     q = question.lower()
-    if "price" in q: return f"${prop.price:,} COP"
-    if "area" in q or "size" in q: return f"{prop.area_sqm}m²"
-    if "bed" in q: return f"{prop.bedrooms} bedrooms"
-    if "bath" in q: return f"{prop.bathrooms} bathrooms"
-    if "feature" in q: return f"{', '.join(prop.features) if prop.features else 'No special features'}"
-    if "location" in q: return f"{prop.location}"
-    if "type" in q: return f"{prop.property_type}"
-    return f"{prop.name}: ${prop.price:,} | {prop.bedrooms}bed {prop.bathrooms}bath {prop.area_sqm}m² | {prop.location}"
+    _op_es = {"SALE": "En venta", "RENT": "En arriendo"}
+    if "precio" in q or "price" in q or "costo" in q or "valor" in q:
+        answer = f"${prop.price:,} COP"
+    elif "área" in q or "area" in q or "tamaño" in q or "size" in q or "metros" in q or "m2" in q:
+        answer = f"{prop.area_sqm} m²"
+    elif "hab" in q or "cuart" in q or "bed" in q or "dormit" in q:
+        answer = f"{prop.bedrooms} habitaciones"
+    elif "baño" in q or "bath" in q:
+        answer = f"{prop.bathrooms} baños"
+    elif "barrio" in q or "sector" in q or "ubicación" in q or "location" in q:
+        answer = prop.location
+    elif "tipo" in q or "type" in q:
+        answer = prop.property_type
+    elif "venta" in q or "arriendo" in q or "operación" in q or "rent" in q or "sale" in q:
+        answer = _op_es.get(prop.operation_type or "", prop.operation_type or "No especificado")
+    else:
+        op = _op_es.get(prop.operation_type or "", "")
+        answer = (
+            f"{prop.name}: ${prop.price:,} COP | {prop.bedrooms} hab {prop.bathrooms} baños "
+            f"{prop.area_sqm} m² | {prop.location}" + (f" | {op}" if op else "")
+        )
+
+    return {"answer": answer, "error": None, "error_code": None}
 
 @tool(args_schema=AvailabilityInput)
 def check_availability(property_id, start_date, end_date):
@@ -158,21 +287,28 @@ async def save_liked_property(client_id, property_id):
 
 @tool(args_schema=RequestVisitInput)
 async def request_visit(client_id, property_description, preferred_datetime):
-    """Request a property visit WITHOUT checking the real catalog/availability
-    (use this only while search_properties/check_availability have no real
-    data to offer — i.e. the database isn't connected yet). Sends the
-    request directly to the human agent by email, based only on what the
-    client described in the conversation. Do not invent a client_id — use
-    the one given in the system context for this conversation."""
+    """Solicita una visita directamente al agente humano por correo, SIN consultar
+    el catálogo ni la disponibilidad real. SOLO usar cuando NO se tiene un
+    listing_id real (catálogo desconectado o propiedad no encontrada en búsqueda).
+    Si ya tienes un listing_id, usa siempre el flujo completo:
+    create_or_get_lead → check_agent_availability → book_appointment.
+    NUNCA uses request_visit como fallback cuando esos tools fallen —
+    si create_or_get_lead devuelve code='BACKEND_UNAVAILABLE' o
+    code='BACKEND_AUTH_ERROR', informa al cliente del problema técnico y
+    dile que un agente lo contactará pronto; no llames request_visit.
+    No inventes client_id — usa el del contexto del sistema."""
     import os
     import uuid
     from agent.notifications import send_manual_visit_request
 
     appointment_id = f"manual-{uuid.uuid4().hex[:8]}"
 
+    # preferred_datetime es Optional[datetime]; serializar a str para la notificación.
+    dt_str = preferred_datetime.isoformat() if preferred_datetime is not None else "flexible/lo antes posible"
+
     try:
         ok = await send_manual_visit_request(
-            appointment_id, client_id, property_description, preferred_datetime
+            appointment_id, client_id, property_description, dt_str
         )
     except Exception as e:
         print(f"[request_visit] No se pudo notificar al agente: {e}")
@@ -210,28 +346,51 @@ async def create_or_get_lead(client_id, listing_id):
 
     # Resolver listing_id → agency_id antes de llamar al backend, de modo que
     # HttpLead pueda incluir X-Agency-Id en POST /leads.
+    # Cada rama de error retorna inmediatamente con un `code` legible por el LLM;
+    # si llegamos al bloque de provider, agency_id es siempre un str válido.
     resolver = get_listing_agency_resolver_provider()
     try:
-        agency_id: str | None = await resolver.resolve(listing_id)
+        agency_id: str = await resolver.resolve(listing_id)
         agency_registry.register(listing_id=listing_id, agency_id=agency_id)
     except UnknownListingError:
-        # Listing no mapeado a ninguna agencia conocida: HttpLead lanzará
-        # UnregisteredEntityError — el tool retorna error al LLM.
-        agency_id = None
-    except httpx.HTTPStatusError as e:
-        # 403/5xx del resolver (auth, infra) — devolvemos dict de error para
-        # no dejar escapar la excepción al grafo (evita envenenamiento de
-        # MemorySaver). El LLM recibe el error y puede informar al usuario.
-        code = e.response.status_code
+        # 404/422 del resolver: listing inexistente o fuera de la agencia del bot.
         return {
             "client_id": client_id,
             "listing_id": listing_id,
-            "error": f"Error del servidor ({code}) al validar el listing.",
-            "error_code": code,
+            "error": (
+                f"El listing {listing_id!r} no existe o no está disponible "
+                f"bajo la agencia del bot. Verifica que el listing_id sea correcto."
+            ),
+            "error_code": None,
+            "code": "UNKNOWN_LISTING",
+        }
+    except httpx.HTTPStatusError as e:
+        http_code = e.response.status_code
+        if http_code in (400, 401, 403):
+            code_str = "BACKEND_AUTH_ERROR"
+            msg = f"Error de autenticación ({http_code}) al validar el listing."
+        else:
+            code_str = "BACKEND_UNAVAILABLE"
+            msg = f"Error del servidor ({http_code}) al validar el listing."
+        return {
+            "client_id": client_id,
+            "listing_id": listing_id,
+            "error": msg,
+            "error_code": http_code,
+            "code": code_str,
+        }
+    except httpx.TransportError as e:
+        # ConnectError, ReadTimeout, u otro error de transporte del resolver.
+        return {
+            "client_id": client_id,
+            "listing_id": listing_id,
+            "error": str(e),
+            "error_code": None,
+            "code": "BACKEND_UNAVAILABLE",
         }
     except Exception as e:
-        # Cualquier otro fallo del resolver (ej. ReadTimeout por cold-start)
-        # no debe propagar fuera del tool — misma razón que el caso anterior.
+        # Error no categorizado del resolver — no agregar `code` para no
+        # prometer más de lo que sabemos.
         return {
             "client_id": client_id,
             "listing_id": listing_id,
@@ -241,16 +400,13 @@ async def create_or_get_lead(client_id, listing_id):
 
     provider = get_lead_provider()
     try:
-        # source_channel: IN_APP como stopgap — el backend no acepta TELEGRAM (ask #1).
-        result = await provider.create_or_get_lead(client_id, listing_id, "IN_APP")
-        # Registrar también bajo lead_id y agent_id para que HttpAppointmentBooking
-        # y HttpAgentSlots puedan recuperar el agency_id por sus propios ids.
-        if agency_id is not None:
-            agency_registry.register(
-                lead_id=result["id"],
-                agent_id=result["agent_id"],
-                agency_id=agency_id,
-            )
+        result = await provider.create_or_get_lead(client_id, listing_id, "TELEGRAM")
+        # agency_id es siempre str aquí (todas las ramas de fallo retornaron arriba).
+        agency_registry.register(
+            lead_id=result["id"],
+            agent_id=result["agent_id"],
+            agency_id=agency_id,
+        )
         return {**result, "error": None, "error_code": None}
     except httpx.HTTPStatusError as e:
         code = e.response.status_code
@@ -267,6 +423,19 @@ async def create_or_get_lead(client_id, listing_id):
 async def check_agent_availability(agent_id, date_from, date_to):
     """Consulta los slots disponibles de un agente inmobiliario entre dos fechas.
     Solo retorna slots reales; si no hay ninguno retorna lista vacía — nunca inventa horarios."""
+    from agent import agency_registry
+    if not agency_registry.is_registered(agent_id):
+        return {
+            "agent_id": agent_id,
+            "slots": [],
+            "error": (
+                "No tengo un agente válido para consultar disponibilidad. "
+                "Ejecuta primero create_or_get_lead(client_id, listing_id) "
+                "y usa el agent_id que devuelve."
+            ),
+            "error_code": None,
+            "code": "BOT_AGENT_NOT_REGISTERED",
+        }
     from agent.agent_slots import get_agent_slots_provider
     provider = get_agent_slots_provider()
     try:
@@ -277,7 +446,7 @@ async def check_agent_availability(agent_id, date_from, date_to):
 
 
 @tool(args_schema=BookAppointmentInput)
-async def book_appointment(lead_id, scheduled_at, duration_min=60, agent_id=None):
+async def book_appointment(lead_id, scheduled_at, duration_min=30, agent_id=None):
     """Agenda una visita a una propiedad usando un slot real obtenido de check_agent_availability.
     Nunca inventes scheduled_at ni lead_id — usa solo valores confirmados en la conversación.
     Incluye agent_id (del resultado de create_or_get_lead) para que, en caso de conflicto,
@@ -291,11 +460,34 @@ async def book_appointment(lead_id, scheduled_at, duration_min=60, agent_id=None
         alternatives_window,
         UNAVAILABLE, TAKEN, TOO_SOON, OPEN_VISIT, CLOSED_LEAD, UNKNOWN,
     )
+    from agent import agency_registry
+    if not agency_registry.is_registered(lead_id):
+        return {
+            "lead_id": lead_id,
+            "scheduled_at": scheduled_at,
+            "error": (
+                "No tengo un lead válido para agendar. "
+                "Ejecuta primero create_or_get_lead(client_id, listing_id), "
+                "luego check_agent_availability, y finalmente book_appointment."
+            ),
+            "error_code": None,
+            "code": "BOT_LEAD_NOT_REGISTERED",
+            "category": UNKNOWN,
+            "alternatives": [],
+        }
 
     provider = get_appointment_booking_provider()
     try:
         result = await provider.book(lead_id, scheduled_at, duration_min)
-        return {**result, "error": None, "error_code": None}
+        # Añadimos scheduled_at_local (hora Bogotá) para que el mensaje de confirmación
+        # al cliente use hora local. El campo scheduled_at (UTC) sigue siendo la fuente
+        # de verdad para integraciones — no lo reemplazamos.
+        from agent.agent_slots import _to_local
+        try:
+            local_str = _to_local(scheduled_at)
+        except Exception:
+            local_str = None
+        return {**result, "error": None, "error_code": None, "scheduled_at_local": local_str}
     except httpx.HTTPStatusError as e:
         code = e.response.status_code
         # Extraer detail del cuerpo JSON; si no es JSON, usar cadena vacía.

@@ -29,3 +29,4 @@ skills-lock.json
 apps/agent/INTEGRATION.md
 apps/agent/LANGCHAIN_IMPLEMENTATION.md
 apps/agent/README.md
+*.egg-info/

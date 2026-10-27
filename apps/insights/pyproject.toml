@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "proptech-insights"
+version = "0.1.0"
+description = "Read-only insights agent for agency TEAM_ADMINs (HU-18)"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.6",
+    "httpx>=0.27",
+    "python-dotenv>=1.0.0",
+    "langgraph>=0.2.0",
+    "langchain-core>=1.0",
+    "tzdata>=2024.1",
+    "proptech-shared",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.setuptools]
+packages = ["insights"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.uv.sources]
+proptech-shared = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]

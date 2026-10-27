@@ -1,436 +1,367 @@
-# Webhook Telegram ↔ Agente Conversacional — Proptech Marketplace
+# Homelitics — AI Agents
 
-Monorepo con dos paquetes en un **workspace de `uv`**:
-- **Webhook** (raíz del repo): recibe mensajes de Telegram, expuesto vía FastAPI.
-- **`apps/agent`**: el agente conversacional (LangChain + LangGraph + Gemini),
-  con búsqueda de propiedades, agendamiento de visitas, y ahora
-  **notificaciones por correo** cuando se agenda una cita.
+AI layer of **Homelitics**, a two-sided proptech marketplace that connects home seekers with real estate agencies.
+This repository contains the two AI services built by the AI/Bot line of the team:
 
-Ambos comparten un solo entorno virtual y un solo `uv.lock` — un comando
-(`uv sync`) instala todo, y el webhook importa al agente directamente como
-un paquete de Python normal (sin llamadas HTTP entre los dos).
+| Service | Path | Who uses it | What it does |
+|---|---|---|---|
+| **Telegram assistant** (E6) | repo root + `apps/agent/` | Clients (buyers/renters) | Conversational property search and visit scheduling over Telegram (HU-21, HU-22) |
+| **Insights agent** | `apps/insights/` | Agency `TEAM_ADMIN`s, from the web panel | Read-only decision support over the agency's leads, funnel and listings (HU-18) |
 
-## Mapa de archivos y cómo se conectan
+Both services are **channels on top of the same Homelitics backend** (FastAPI + Supabase, separate repository). They do not own any business data: every lead, appointment and listing is read from or written to the backend API.
 
-```
-pyproject.toml         <-- raíz del workspace de uv (ver sección 5)
-uv.lock                 <-- un solo lockfile para TODO el proyecto
+---
 
-config.py               <-- lee el .env
-telegram_service.py    <-- llama a la API de Telegram (enviar mensajes)
-ai_service.py            <-- llama a Gemini directo; ya NO se usa en el flujo normal (legacy)
-chat_history.py          <-- historial de conversación por chat_id, a nivel webhook
-main.py                  <-- servidor FastAPI: recibe el webhook y llama al agente
-run.ps1 / stop.ps1       <-- scripts de arranque/apagado (ver sección 2)
+## Table of contents
 
-apps/agent/
-  pyproject.toml         <-- dependencias propias del agente
-  src/agent/
-    core_langchain.py    <-- handle_turn() — punto de entrada que usa main.py
-    tools_langchain.py   <-- herramientas del agente (buscar, agendar, etc.)
-    notifications.py     <-- NUEVO: envío de correo cuando se agenda una cita
-    llm.py                <-- selección de modelo (fake / gemini)
-    fakes/                <-- catálogo, disponibilidad, reservas (en memoria)
-```
+1. [Repository structure](#1-repository-structure)
+2. [Architecture](#2-architecture)
+3. [Getting started](#3-getting-started)
+4. [Running the Telegram assistant](#4-running-the-telegram-assistant)
+5. [Running the insights agent](#5-running-the-insights-agent)
+6. [Configuration reference](#6-configuration-reference)
+7. [Testing](#7-testing)
+8. [Observability (Langfuse)](#8-observability-langfuse)
+9. [Troubleshooting](#9-troubleshooting)
+10. [Known technical debt](#10-known-technical-debt)
 
-Flujo de un mensaje real:
+---
+
+## 1. Repository structure
+
+The repo is a **`uv` workspace**: several Python packages share one virtual environment (`.venv/`) and one lockfile (`uv.lock`), but each keeps its own `pyproject.toml`.
 
 ```
-Telegram --POST--> main.py (/webhook/telegram)
-                       |
-                       |-- valida el secreto (config.py)
-                       |-- delega a handle_message()
-                                |
-                                |-- agent.core_langchain.handle_turn(chat_id, "telegram", texto)
-                                |         |
-                                |         |-- el agente decide si busca propiedades,
-                                |         |   responde preguntas, o agenda una cita
-                                |         |
-                                |         |-- si agenda: tools_langchain.schedule_meeting()
-                                |                   |
-                                |                   |-- crea la cita (FakeBooking)
-                                |                   |-- notifications.notify_agent_appointment()
-                                |                             |
-                                |                             |-- manda el correo por SMTP
-                                |
-                                |-- telegram_service.send_message() -> entrega la respuesta
+.
+├── pyproject.toml          # Workspace root + Telegram webhook package (proptech-webhook)
+├── uv.lock                 # Single lockfile for the whole workspace
+├── env.example             # Template for the root .env (webhook + agent)
+├── main.py                 # FastAPI app: Telegram webhook → handle_turn()
+├── config.py               # Loads .env, validates required variables
+├── telegram_service.py     # Sends messages through the Telegram Bot API
+├── chat_history.py         # Per-chat history used by /start and /reset
+├── ai_service.py           # Legacy direct Gemini call (not used in the normal flow)
+├── run.ps1 / stop.ps1      # Local start/stop scripts (uvicorn + cloudflared + setWebhook)
+│
+└── apps/
+    ├── agent/              # proptech-agent — conversational assistant (LangChain + LangGraph)
+    │   ├── prompts/system.md
+    │   ├── scripts/        # chat.py (console chat), smoke tests
+    │   ├── src/agent/
+    │   │   ├── core_langchain.py   # handle_turn() — the single public entry point
+    │   │   ├── tools_langchain.py  # Tools exposed to the LLM
+    │   │   ├── booking.py, agent_slots.py, leads.py, listing_search.py, ...
+    │   │   ├── backend_auth.py, jwt_provider.py   # Bot service-account auth
+    │   │   ├── notifications.py    # Email notifications (SMTP)
+    │   │   ├── ports/              # Interfaces (ports)
+    │   │   └── fakes/              # In-memory implementations for dev/tests
+    │   └── tests/
+    │
+    ├── insights/           # proptech-insights — insights agent for TEAM_ADMINs
+    │   ├── env.example
+    │   ├── prompts/system.md
+    │   ├── scripts/        # get_token.py, smoke.ps1
+    │   ├── src/insights/
+    │   │   ├── main.py     # FastAPI app: /health, /insights/chat
+    │   │   ├── gate.py     # TEAM_ADMIN gate (runs before any LLM call)
+    │   │   ├── agent.py    # LangGraph agent
+    │   │   └── tools.py    # Read-only analytics tools
+    │   └── tests/
+    │
+    └── shared/             # proptech-shared — LLM, HTTP and observability helpers
+        └── src/shared/
 ```
 
 ---
 
-## 1. Configuración inicial (una sola vez por persona/máquina)
+## 2. Architecture
 
-### Requisito previo — instalar `uv`
+### 2.1 Telegram assistant
 
-`uv` reemplaza tanto a `pip` como a `venv`: maneja las dependencias Y el
-entorno virtual con un solo comando.
-
-```powershell
-winget install --id astral-sh.uv --source winget
+```
+Telegram ──POST──▶ main.py  /webhook/telegram
+                    │  1. validate X-Telegram-Bot-Api-Secret-Token
+                    │  2. reply 200 immediately, process in background
+                    ▼
+            agent.core_langchain.handle_turn(chat_id, "telegram", text)
+                    │  LangGraph agent (Gemini) + MemorySaver (per chat)
+                    │  picks tools:
+                    │    search_properties / answer_property_question
+                    │    create_or_get_lead → check_agent_availability → book_appointment
+                    │    request_visit (manual fallback, notifies the agent by email)
+                    ▼
+            Homelitics backend API  (bot service account JWT + X-Agency-Id)
+                    │
+                    ▼
+            telegram_service.send_message()  ──▶  Telegram
 ```
 
-**Verificación:**
-```powershell
-uv --version
+Key design rules:
+
+- **Single integration seam:** `handle_turn(client_id, channel, message) → AgentReply`. Telegram is only a delivery channel; the agent does not know about Telegram.
+- **One bot per agency:** each deployment is pinned to one agency through `AGENCY_ID`, so a client only sees that agency's listings.
+- **Ports and adapters:** every backend dependency has a `fake` and an `http` implementation, selected with a `*_MODE` env var. This lets the agent run and be tested without a backend.
+- **Bot authentication:** the bot logs in as a dedicated service account (`BOT_EMAIL` / `BOT_PASSWORD`) and sends `X-Agency-Id` on every request; `client_id` is always explicit in payloads.
+
+### 2.2 Insights agent
+
 ```
-Si sale "no se reconoce como comando", cierra y vuelve a abrir PowerShell
-(el PATH se actualiza al reabrir), o instala manualmente siguiendo
-https://docs.astral.sh/uv/getting-started/installation/
-
-### Paso 1 — Crear el bot en Telegram
-
-1. Abre Telegram, busca **@BotFather**.
-2. Envíale `/newbot`.
-3. Te pide un nombre visible (ej. `Proptech Agente IA`) y un username único
-   terminado en `bot` (ej. `proptech_agente_bot`).
-4. Te devuelve un **token**, algo como `8840321755:AAEIq...`. Cópialo.
-
-⚠️ **Este token es un secreto.** No lo compartas en el chat del equipo, ni
-en commits de Git, ni en capturas de pantalla. Si por accidente lo expones,
-revócalo de inmediato: @BotFather → `/mybots` → tu bot → **API Token** →
-**Revoke current token**.
-
-### Paso 2 — Conseguir la API key de Gemini
-
-1. Ve a https://aistudio.google.com/apikey con tu cuenta de Google.
-2. **Create API Key** → copia la key generada (capa gratuita).
-
-Mismo cuidado que con el token de Telegram: es un secreto.
-
-### Paso 3 — Instalar `cloudflared`
-
-Esto es lo que expone tu servidor local a internet para que Telegram pueda
-alcanzarlo (Telegram exige una URL pública con HTTPS).
-
-```powershell
-winget install --id Cloudflare.cloudflared --source winget
+Agency web panel ──POST /insights/chat (Bearer <user JWT>)──▶ insights.main
+                    │  gate.require_team_admin → GET /me on the backend
+                    │    (401/403 before any LLM call if not an active TEAM_ADMIN)
+                    ▼
+            LangGraph agent (Gemini) + read-only tools:
+              get_north_star, get_funnel, list_leads, list_agents,
+              get_agent_response_times, get_lost_reasons,
+              get_listing_performance, segment_demand
+                    │  each tool forwards the user's own JWT to the backend
+                    ▼
+            { reply, conversation_id, sources[] }
 ```
 
-**Por qué `--source winget` explícito:** por defecto `winget` busca en dos
-catálogos (`msstore` y `winget`), y en algunas redes (universitarias,
-corporativas) la consulta al catálogo de Microsoft Store falla por DNS
-aunque el paquete sí exista en el catálogo de `winget`. Forzar la fuente
-evita ese error.
+- **Read-only:** the insights agent never writes to the backend.
+- **The user's permissions apply:** it reuses the caller's token, so it can only see what that `TEAM_ADMIN` can see.
+- **Traceable answers:** every reply includes `sources` (tool, endpoint and parameters used).
 
-Si aun así falla, instala manualmente:
-1. Ve a https://github.com/cloudflare/cloudflared/releases/latest
-2. Descarga `cloudflared-windows-amd64.exe`
-3. Renómbralo a `cloudflared.exe`, colócalo en `C:\cloudflared\` (fuera de
-   la carpeta del proyecto)
-4. Agrégala al PATH: menú inicio → "variables de entorno" → **Editar las
-   variables de entorno del sistema** → **Variables de entorno** → en tu
-   usuario, **Path** → **Editar** → **Nuevo** → pega la ruta de la carpeta
-   → Aceptar → **cierra y vuelve a abrir PowerShell**
+---
 
-**Verificación:**
-```powershell
-cloudflared --version
-```
+## 3. Getting started
 
-### Paso 4 — Permitir que PowerShell ejecute scripts locales
+### 3.1 Prerequisites (once per machine)
 
-```powershell
-Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
-```
+| Tool | Install (Windows / PowerShell) | Check |
+|---|---|---|
+| `uv` (packages + virtualenv) | `winget install --id astral-sh.uv --source winget` | `uv --version` |
+| `cloudflared` (public HTTPS tunnel, Telegram only) | `winget install --id Cloudflare.cloudflared --source winget` | `cloudflared --version` |
+| Allow local scripts | `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned` | `Get-ExecutionPolicy -Scope CurrentUser` |
 
-**Qué hace:** por defecto, muchas instalaciones de Windows bloquean
-cualquier script `.ps1` (incluyendo `run.ps1` y `stop.ps1`) por seguridad.
-Este comando permite tus propios scripts locales, y sigue exigiendo firma
-digital para scripts descargados de internet.
+> `--source winget` avoids a DNS failure against the Microsoft Store catalog on some university/corporate networks. If `winget` still fails, download the binary from the [cloudflared releases page](https://github.com/cloudflare/cloudflared/releases/latest) and add its folder to `PATH`.
 
-Confirma con `S` cuando pregunte. **Se configura una sola vez por usuario
-de Windows**, no por proyecto.
+### 3.2 Credentials you will need
 
-**Verificación:**
-```powershell
-Get-ExecutionPolicy -Scope CurrentUser
-```
-Debe responder `RemoteSigned`.
+- **Telegram bot token** — talk to [@BotFather](https://t.me/BotFather), send `/newbot`, copy the token.
+- **Gemini API key** — create one at <https://aistudio.google.com/apikey>.
+- **Bot service account** (`BOT_EMAIL`, `BOT_PASSWORD`) and **`AGENCY_ID`** — ask the Backend Lead.
 
-### Paso 5 — Preparar el proyecto
+> ⚠️ These are secrets. Never commit them, paste them in team chats, or show them in screenshots. If a Telegram token leaks, revoke it: @BotFather → `/mybots` → your bot → **API Token** → **Revoke current token**.
 
-Parado en la raíz del repo (donde está `pyproject.toml`):
+### 3.3 Install
+
+From the repository root:
 
 ```powershell
 uv sync
 ```
 
-**Qué hace:** lee `pyproject.toml` y `uv.lock`, crea un entorno virtual en
-`.venv/` (automático, no hay que activarlo a mano), e instala **todo** —
-las dependencias del webhook (FastAPI, httpx...) y las del agente
-(LangChain, LangGraph...) — en un solo paso, porque ambos son parte del
-mismo workspace.
+This creates `.venv/` and installs every workspace package (`webhook`, `agent`, `insights`, `shared`). There is nothing to activate manually: `uv run <command>` uses that environment.
 
-Vas a ver algo como:
-```
-Resolved 66 packages in ...
-Installed 66 packages in ...
-```
+### 3.4 Environment files
 
-A diferencia de `venv` + `pip`, **no hay que activar nada manualmente** —
-`uv run <comando>` (lo que usan `run.ps1` y el resto de esta guía) ya sabe
-usar ese entorno automáticamente.
+| File | Template | Used by |
+|---|---|---|
+| `.env` (root) | `env.example` | Telegram webhook + agent (they run in the same process) |
+| `apps/insights/.env` | `apps/insights/env.example` | Insights agent |
+| `apps/agent/.env` | `apps/agent/.env.example` | Only when running the agent standalone (console / tests) |
 
 ```powershell
-copy .env.example .env
+copy env.example .env
 notepad .env
 ```
 
-Llena los valores reales (ver Pasos 1 y 2 para el token de Telegram y la
-key de Gemini). Por ahora deja `AGENT_LLM_MODE=fake` y
-`NOTIFICATIONS_MODE=fake` — los cambiamos a los reales en la sección 6
-cuando configures el correo.
+Start with every `*_MODE=fake` to check the channel works, then switch to `gemini` / `http` (see [section 6](#6-configuration-reference)).
 
 ---
 
-## 2. Correr el proyecto (camino rápido) ⚡
+## 4. Running the Telegram assistant
 
-Con el `.env` ya lleno:
+### 4.1 Quick start
 
 ```powershell
 .\run.ps1
 ```
 
-Automatiza: `uv sync` (por si hay dependencias nuevas) → levanta `uvicorn`
-en una ventana nueva → levanta `cloudflared` en otra → detecta la URL
-pública → la registra como webhook en Telegram, con reintentos si Telegram
-tarda en resolver el DNS del túnel.
+The script runs `uv sync`, starts `uvicorn` on port 3000, opens a `cloudflared` tunnel, detects the public URL and registers it as the Telegram webhook (with retries). When you are done, close both windows (`Ctrl+C`) and unregister the webhook:
 
-Al final deberías ver:
-```
-Listo! Webhook registrado correctamente.
-URL: https://algo-random.trycloudflare.com/webhook/telegram
-```
-
-**Para terminar la sesión de pruebas**, cierra las dos ventanas (`Ctrl+C`
-en cada una) y desregistra el webhook:
 ```powershell
 .\stop.ps1
 ```
 
----
+### 4.2 Manual start (useful for debugging `run.ps1`)
 
-## 3. Correr el proyecto (paso a paso manual)
-
-Útil si `run.ps1` falla y quieres ver en qué paso exacto está el problema.
-
-**Terminal 1 — Servidor:**
 ```powershell
+# Terminal 1 — server
 uv run uvicorn main:app --reload --port 3000
-```
-Verifica: `curl http://localhost:3000/` → `{"status":"ok",...}`
+# check: curl http://localhost:3000/   →  {"status":"ok", ...}
 
-**Terminal 2 — Túnel:**
-```powershell
+# Terminal 2 — tunnel
 cloudflared tunnel --url http://localhost:3000
-```
-Copia la URL `https://....trycloudflare.com`.
 
-**Terminal 3 — Registrar el webhook:**
-```powershell
+# Terminal 3 — register the webhook
 Invoke-RestMethod -Uri "https://api.telegram.org/bot<TOKEN>/setWebhook" `
   -Method Post -ContentType "application/json" `
-  -Body '{"url": "<TU_URL>/webhook/telegram", "secret_token": "<SECRET>"}'
+  -Body '{"url": "<TUNNEL_URL>/webhook/telegram", "secret_token": "<TELEGRAM_WEBHOOK_SECRET>"}'
+# check: Invoke-RestMethod -Uri "https://api.telegram.org/bot<TOKEN>/getWebhookInfo"
 ```
-Verifica: `Invoke-RestMethod -Uri "https://api.telegram.org/bot<TOKEN>/getWebhookInfo"`
 
----
+### 4.3 Without Telegram (console)
 
-## 4. Probar
-
-Manda `/start` a tu bot, luego un mensaje real como *"Busco apartamento de
-2 habitaciones en Laureles"*. Con `AGENT_LLM_MODE=fake`, las respuestas son
-genéricas (para probar el canal sin gastar cuota de Gemini). Con
-`AGENT_LLM_MODE=gemini`, el agente responde de verdad, busca en el catálogo,
-y puede agendar visitas.
-
-Para probar el agendamiento de una vez: pide una propiedad, pide
-disponibilidad, y confirma agendar una visita — eso dispara el correo de
-notificación (sección 6).
-
----
-
-## 5. El workspace de `uv`: cómo quedó estructurado
-
-`uv` permite que varios paquetes de Python vivan en el mismo repo,
-compartiendo un solo entorno y un solo lockfile, pero manteniendo cada uno
-su propio `pyproject.toml`. Así quedó configurado:
-
-**`pyproject.toml` (raíz)** — define el proyecto del webhook y declara el
-workspace:
-```toml
-[tool.uv.sources]
-proptech-agent = { workspace = true }
-
-[tool.uv.workspace]
-members = ["apps/*"]
+```powershell
+uv run python apps/agent/scripts/chat.py
 ```
-La primera línea le dice a `uv` que la dependencia `proptech-agent` no
-viene de PyPI, sino que es el paquete que vive en `apps/agent` dentro de
-este mismo repo. La segunda línea incluye todo lo que esté bajo `apps/` como
-parte del workspace.
 
-**`apps/agent/pyproject.toml`** — define el paquete del agente
-(`proptech-agent`), con sus propias dependencias (LangChain, LangGraph,
-`aiosmtplib` para el correo).
+### 4.4 Try it
 
-**Resultado práctico:** `main.py` puede hacer
-`from agent.core_langchain import handle_turn` como si fuera cualquier
-librería instalada — sin trucos de `sys.path`, sin copiar código. `uv sync`
-en la raíz instala ambos paquetes y sus dependencias en un único
-`.venv/`.
+Send `/start` to the bot, then something like *"I'm looking for a 2-bedroom apartment in Laureles"*. With `AGENT_LLM_MODE=fake` replies are canned (no Gemini quota used). With `AGENT_LLM_MODE=gemini` and the `http` modes, the bot searches the agency's real catalog and can book a visit end to end.
 
-**Un solo `.env`:** como todo corre en el mismo proceso, `config.py` carga
-un único `.env` en la raíz que trae tanto las variables del webhook
-(`TELEGRAM_*`) como las del agente (`GOOGLE_API_KEY`, `AGENT_LLM_MODE`,
-las de SMTP). El `apps/agent/.env.example` sigue existiendo por separado
-solo para cuando alguien quiera correr el agente de forma aislada (modo
-consola, tests) sin levantar el webhook.
+Bot commands: `/start` (greeting, clears history) and `/reset` (clears history).
 
 ---
 
-## 6. Notificaciones por correo (SMTP)
+## 5. Running the insights agent
 
-Cuando el agente agenda una cita (herramienta `schedule_meeting` en
-`apps/agent/src/agent/tools_langchain.py`), ahora manda un correo real al
-agente inmobiliario humano avisándole — antes esto solo se guardaba en
-memoria (`FakeNotifications`) y no llegaba a nadie.
+```powershell
+copy apps\insights\env.example apps\insights\.env
+uv run uvicorn insights.main:app --reload --port 8001
+```
 
-### Cómo funciona
+Endpoints:
 
-`apps/agent/src/agent/notifications.py` implementa `NotificationsPort`
-(la interfaz que ya existía en `agent/ports/__init__.py`) usando
-`aiosmtplib` — la versión asíncrona de `smtplib`, para no bloquear el
-servidor mientras se conecta al proveedor de correo.
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/health` | — | Liveness check |
+| `POST` | `/insights/chat` | `Bearer <TEAM_ADMIN JWT>` | Body: `{ "message": "...", "conversation_id": null }` |
 
-Cuál implementación se usa se decide por la variable `NOTIFICATIONS_MODE`
-(mismo patrón que `AGENT_LLM_MODE` para elegir entre el modelo fake y
-Gemini):
-- `fake` (default) → no manda nada real, solo lo guarda en memoria. Útil
-  para desarrollar sin generar correos de prueba constantemente.
-- `email` → manda el correo real por SMTP.
+Dev helpers:
 
-El correo incluye: nombre y ubicación de la propiedad, precio, fecha/hora
-de la visita, ID de la cita, y el `chat_id` del cliente (para que el
-agente pueda ubicar la conversación).
+```powershell
+# Get a TEAM_ADMIN JWT (uses INSIGHTS_DEV_EMAIL / INSIGHTS_DEV_PASSWORD)
+uv run python apps/insights/scripts/get_token.py
 
-### Opción A — Gmail con contraseña de aplicación (recomendada para probar rápido)
+# Smoke test against the running service
+powershell -ExecutionPolicy Bypass -File apps/insights/scripts/smoke.ps1 -Port 8001
+```
 
-Gmail no deja usar tu contraseña normal para SMTP por seguridad; hay que
-generar una "contraseña de aplicación" específica.
-
-1. Activa la verificación en dos pasos en tu cuenta de Google (si no la
-   tienes, Gmail no te deja crear contraseñas de aplicación):
-   https://myaccount.google.com/security
-2. Ve a https://myaccount.google.com/apppasswords
-3. Genera una contraseña nueva (nombre sugerido: "Proptech SMTP"). Te da
-   una contraseña de 16 caracteres — cópiala, no vuelve a mostrarse.
-4. En tu `.env`:
-   ```
-   NOTIFICATIONS_MODE=email
-   SMTP_HOST=smtp.gmail.com
-   SMTP_PORT=587
-   SMTP_USER=tu_correo@gmail.com
-   SMTP_PASSWORD=la_contraseña_de_16_caracteres_sin_espacios
-   SMTP_FROM=tu_correo@gmail.com
-   SMTP_USE_TLS=true
-   AGENT_NOTIFICATION_EMAIL=correo_del_agente_inmobiliario@ejemplo.com
-   ```
-
-### Opción B — Mailtrap (sandbox de pruebas, no manda correos reales)
-
-Si prefieres no usar una cuenta de Gmail real mientras desarrollan (para
-no llenar una bandeja de entrada real con pruebas), Mailtrap simula el
-envío: los correos "llegan" a una bandeja de pruebas en su web, nunca a un
-destinatario real.
-
-1. Crea una cuenta gratis en https://mailtrap.io
-2. **Email Testing** → **Inboxes** → tu inbox → pestaña **SMTP Settings**
-3. Copia el host, puerto, usuario y contraseña que te muestran ahí
-4. En tu `.env`:
-   ```
-   NOTIFICATIONS_MODE=email
-   SMTP_HOST=sandbox.smtp.mailtrap.io
-   SMTP_PORT=587
-   SMTP_USER=<el que te dio Mailtrap>
-   SMTP_PASSWORD=<la que te dio Mailtrap>
-   SMTP_FROM=noreply@proptech-marketplace.test
-   SMTP_USE_TLS=true
-   AGENT_NOTIFICATION_EMAIL=cualquier_correo@ejemplo.com
-   ```
-Los correos van a aparecer en el inbox de Mailtrap, no en una bandeja real
-— ideal para el sprint mientras confirman que el envío funciona.
-
-### Probar el envío
-
-Con `AGENT_LLM_MODE=gemini` y `NOTIFICATIONS_MODE=email`, agenda una cita
-completa por Telegram (busca una propiedad, pide disponibilidad, confirma
-agendar). Revisa la consola de `uvicorn`:
-- Si no aparece ningún error de `[notifications]`, el correo se mandó —
-  revisa la bandeja (real o de Mailtrap) que configuraste en
-  `AGENT_NOTIFICATION_EMAIL`.
-- Si aparece `[notifications] Error enviando correo: ...`, el mensaje de
-  error te dice la causa (credenciales inválidas, host incorrecto, etc.) —
-  la cita se guarda igual, solo falla el aviso.
+Set `INSIGHTS_CORS_ORIGINS` to the web panel's origin(s) so the browser can call the service.
 
 ---
 
-## 7. Nota sobre el modelo de Gemini
+## 6. Configuration reference
 
-Google ha ido retirando modelos de Gemini varias veces durante 2026. El
-agente usa la variable `GEMINI_MODEL` en el `.env` (default
-`gemini-3.6-flash`); si en el futuro sale un error `404` diciendo que el
-modelo ya no existe, ese es el único valor que hay que actualizar — no
-hace falta tocar código. Revisa
-https://ai.google.dev/gemini-api/docs/models para la lista vigente.
+### 6.1 Telegram webhook + agent (root `.env`)
 
-`ai_service.py` (el archivo que llamaba a Gemini directo, de antes de
-integrar el agente) sigue en el repo intacto pero **ya no se usa en el
-flujo normal** — se dejó por si sirve de referencia, pero `config.py`
-todavía exige `GEMINI_API_KEY` en el `.env` por compatibilidad con él.
+| Variable | Required | Description |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | Yes | Token from @BotFather |
+| `TELEGRAM_WEBHOOK_SECRET` | Recommended | Random string; Telegram sends it back so we can reject forged requests |
+| `GEMINI_API_KEY` | Yes | Still required at startup by `config.py` (legacy, see [section 10](#10-known-technical-debt)) |
+| `GOOGLE_API_KEY` | For `gemini` mode | Gemini key used by the agent (can be the same as above) |
+| `GEMINI_MODEL` | No | Default `gemini-3.6-flash`. If Gemini returns `404` for a model, update only this value ([model list](https://ai.google.dev/gemini-api/docs/models)) |
+| `AGENT_LLM_MODE` | No | `fake` (keyword replies, no quota) \| `gemini` |
+| `AGENT_DEBUG` | No | `true` prints every tool call, its arguments and its result |
+| `BACKEND_URL` | For `http` modes | e.g. `https://homelitics-api.onrender.com` |
+| `BOT_EMAIL`, `BOT_PASSWORD` | For `http` modes | Bot service account (must be set together) |
+| `AGENCY_ID` | For `http` modes | Agency this bot deployment belongs to (sent as `X-Agency-Id`) |
+| `SUPABASE_URL`, `SUPABASE_ANON_KEY` | For `http` modes | Used to log the service account in |
+
+**Provider modes** — each one is `fake` (in memory, no backend) or `http` (real backend):
+
+| Variable | Controls |
+|---|---|
+| `AGENT_SLOTS_MODE` | Agent availability (`check_agent_availability`) |
+| `APPOINTMENT_BOOKING_MODE` | Booking (`book_appointment`) |
+| `CLIENT_RESOLVER_MODE` | Telegram chat → backend client (`POST /clients`) |
+| `LEAD_MODE` | Lead creation (`create_or_get_lead`) |
+| `LISTING_AGENCY_RESOLVER_MODE` | Listing → agency resolution |
+| `LISTING_SEARCH_MODE` | Property search (`search_properties`) |
+
+> If `LEAD_MODE=http`, then `LISTING_AGENCY_RESOLVER_MODE` and `LISTING_SEARCH_MODE` must also be `http`. The app checks this at startup and refuses to start with an invalid combination.
+
+**Email notifications** (sent when a client asks for a visit through `request_visit`):
+
+| Variable | Description |
+|---|---|
+| `NOTIFICATIONS_MODE` | `fake` (stored in memory, default) \| `email` (real SMTP) |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_USE_TLS` | SMTP server settings |
+| `AGENT_NOTIFICATION_EMAIL` | Real estate agent who receives the notification |
+
+Two common SMTP setups:
+
+- **Gmail** — enable 2-step verification, create an [app password](https://myaccount.google.com/apppasswords), then use `smtp.gmail.com:587` with that 16-character password (not your normal password).
+- **Mailtrap** (sandbox, nothing reaches a real inbox) — create a free inbox at <https://mailtrap.io> and copy its SMTP settings (`sandbox.smtp.mailtrap.io:587`).
+
+A failed email never blocks the conversation: the error is logged as `[notifications] ...` and the flow continues.
+
+### 6.2 Insights agent (`apps/insights/.env`)
+
+| Variable | Description |
+|---|---|
+| `BACKEND_URL` | Homelitics backend (default `https://homelitics-api.onrender.com`) |
+| `INSIGHTS_LLM_MODE` | `fake` (no network) \| `gemini` |
+| `GEMINI_API_KEY`, `GEMINI_MODEL` | Gemini credentials and model |
+| `INSIGHTS_LLM_MAX_RETRIES` | Total attempts per Gemini call (min 1). Exhausted retries return `502` |
+| `INSIGHTS_LLM_TIMEOUT` | Timeout per attempt, in seconds (default 60) |
+| `INSIGHTS_CORS_ORIGINS` | Comma-separated allowed origins for the web panel |
+| `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `INSIGHTS_DEV_EMAIL`, `INSIGHTS_DEV_PASSWORD` | Dev only, for `scripts/get_token.py` |
 
 ---
 
-## 8. Historial de conversación
+## 7. Testing
 
-Hay **dos** sistemas de historial funcionando en paralelo, y vale la pena
-tenerlo claro:
+Tests use `pytest` + `pytest-asyncio` and run against the `fake` providers, so they need no backend, no Gemini key and no Telegram.
 
-- **`chat_history.py`** (a nivel del webhook) — guarda los mensajes por
-  `chat_id` de Telegram, usado para los comandos `/start` y `/reset`.
-- **El agente mismo** — `core_langchain.py` usa `thread_id=client_id` con
-  `MemorySaver` de LangGraph, manteniendo su propio historial internamente
-  para razonar con contexto (recordar qué propiedad se mencionó antes,
-  etc.).
+```powershell
+# Conversational agent
+cd apps/agent;    uv run pytest; cd ../..
 
-Son redundantes en parte, pero no chocan — el segundo es el que realmente
-afecta las respuestas del agente; el primero seguía existiendo porque
-`main.py` no se tocó a fondo al integrar el agente. Si en algún momento
-quieren simplificar, `chat_history.py` podría eliminarse del flujo
-(`/start` y `/reset` seguirían funcionando llamando en su lugar al
-historial del agente) — no es urgente para este sprint.
+# Insights agent
+cd apps/insights; uv run pytest; cd ../..
+```
 
-Ambos son **en memoria**: se pierden si reinicias `uvicorn`.
+Manual smoke scripts (they hit real services): `apps/agent/scripts/smoke_gemini.py`, `apps/agent/scripts/smoke_test_auth.py`, `apps/insights/scripts/smoke.ps1`.
+
+---
+
+## 8. Observability (Langfuse)
+
+Both services can send traces to [Langfuse](https://cloud.langfuse.com): one trace per turn / request, with nested spans for each LLM call and tool, grouped by conversation.
+
+1. Create a project at <https://cloud.langfuse.com> → **Settings** → **API keys**.
+2. Add to the corresponding `.env`:
+   ```
+   LANGFUSE_PUBLIC_KEY=pk-lf-...
+   LANGFUSE_SECRET_KEY=sk-lf-...
+   LANGFUSE_BASE_URL=https://cloud.langfuse.com   # only change for self-hosted
+   ```
+3. Restart the service.
+
+Tracing is **opt-in and fail-open**: without keys it is disabled with no errors and no change in behavior, and a Langfuse outage never breaks a conversation.
 
 ---
 
 ## 9. Troubleshooting
 
-| Síntoma | Dónde revisar |
+| Symptom | Where to look |
 |---|---|
-| `uv sync` falla con conflicto de versiones | Revisa que no hayas editado a mano `uv.lock` — bórralo y corre `uv lock` de nuevo para regenerarlo |
-| `ModuleNotFoundError: agent` | `uv sync` no se corrió, o falta el `[tool.uv.sources]` en el `pyproject.toml` raíz — confirma que `apps/agent` aparece en `uv sync` como paquete instalado |
-| El bot no responde nada | `getWebhookInfo` → revisa `last_error_message` |
-| Responde `/start` pero no lo demás | Log de `uvicorn` — revisa `[main] Error llamando al agente: ...` |
-| Error 401 al enviar mensajes (`sendMessage`) | El `TELEGRAM_BOT_TOKEN` del `.env` no coincide con el vigente |
-| Error 401 al **recibir** mensajes (webhook) | El `secret_token` usado en `setWebhook` no coincide con el `.env` |
-| `cloudflared` no muestra tráfico entrante | El `setWebhook` no se registró bien, o la URL cambió |
-| Gemini responde 404 mencionando un modelo | El modelo quedó deprecado — ver sección 7 |
-| `[notifications] Error enviando correo` | Revisa credenciales SMTP, o si Gmail: confirma que sea la contraseña de aplicación (16 caracteres), no la contraseña normal |
-| El correo no llega pero no hay error | Revisa spam, y que `AGENT_NOTIFICATION_EMAIL` esté bien escrito; con Mailtrap, revisa el inbox en su web, no un correo real |
-| `run.ps1` no detecta la URL del túnel | Corre el paso a paso manual (sección 3) |
+| `uv sync` fails with a version conflict | Don't edit `uv.lock` by hand. Delete it and run `uv lock` to regenerate it |
+| `ModuleNotFoundError: agent` / `insights` / `shared` | Run `uv sync` at the repo root and check that the package appears as installed |
+| App refuses to start mentioning `*_MODE` | Invalid provider combination — see the note in [6.1](#61-telegram-webhook--agent-root-env) |
+| Bot does not answer at all | `getWebhookInfo` → check `last_error_message` |
+| Bot answers `/start` but nothing else | `uvicorn` log → look for `[main] Error llamando al agente: ...` |
+| `401` when **sending** messages | `TELEGRAM_BOT_TOKEN` does not match the current token |
+| `401` when **receiving** messages | The `secret_token` used in `setWebhook` does not match `TELEGRAM_WEBHOOK_SECRET` |
+| `cloudflared` shows no incoming traffic | Webhook not registered, or the tunnel URL changed (it changes on every run) |
+| `run.ps1` does not detect the tunnel URL | Use the manual start ([4.2](#42-manual-start-useful-for-debugging-runps1)) |
+| Gemini returns `404` mentioning a model | Model retired — update `GEMINI_MODEL` |
+| Insights returns `401` / `403` | Missing token, expired token, or the user is not an active `TEAM_ADMIN` |
+| Insights returns `502` | Backend unreachable or Gemini retries exhausted |
+| `[notifications] ...` error | Check SMTP credentials; for Gmail use the app password |
+| Email not received, no error | Check spam and `AGENT_NOTIFICATION_EMAIL`; with Mailtrap check its web inbox |
 
-Para desactivar el webhook cuando termines de probar:
-```powershell
-.\stop.ps1
-```
+---
+
+## 10. Known technical debt
+
+- **`ai_service.py` is legacy.** It is no longer used in the normal flow, but `config.py` still requires `GEMINI_API_KEY` at startup because of it.
+- **Two conversation histories.** `chat_history.py` (webhook, only for `/start` and `/reset`) and LangGraph's `MemorySaver` inside the agent (the one that actually drives replies). Both are in memory and are lost when the server restarts.
+- **Retired tools still in the code.** `check_availability` and `schedule_meeting` were removed from `get_tools()` in Sprint 3 in favor of the real HU-22 route, but their definitions remain as dead code.
+- **`sys.path` workaround in `main.py`.** The agent package is already installed by the `uv` workspace, so this line is redundant.

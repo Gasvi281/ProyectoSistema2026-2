@@ -68,7 +68,7 @@ async def test_request_visit_fake_mode_does_not_claim_human_notified(monkeypatch
     result = await request_visit.ainvoke({
         "client_id": "client_test",
         "property_description": "Apartamento en Laureles",
-        "preferred_datetime": "mañana en la tarde",
+        "preferred_datetime": None,  # flexible/ASAP — preferred_datetime es Optional[datetime]
     })
     # El mensaje honesto debe mencionar "prueba" o "entorno" — nunca debe decir
     # "envié" ni "agente inmobiliario" como si el aviso real se hubiera mandado.
@@ -156,8 +156,36 @@ async def test_request_visit_email_mode_confirms_send(monkeypatch):
     result = await request_visit.ainvoke({
         "client_id": "client_test",
         "property_description": "Casa en Envigado",
-        "preferred_datetime": "este viernes",
+        "preferred_datetime": "2026-09-12T14:00:00-05:00",  # ISO 8601 con zona horaria
     })
     assert "envié tu solicitud" in result.lower() or "agente inmobiliario" in result.lower(), (
         f"En modo email exitoso debe confirmar el envío. Got: {result!r}"
     )
+
+
+@pytest.mark.asyncio
+async def test_request_visit_rejects_uuid_in_property_description(monkeypatch):
+    """UUID en property_description → el validador rechaza con instrucción del flujo correcto.
+
+    Esto es exactamente el patrón del trace de Langfuse (Bug 2):
+    request_visit(property_description='Propiedad con ID <uuid>', ...).
+    """
+    monkeypatch.delenv("NOTIFICATIONS_MODE", raising=False)
+
+    uuid_val = "c34b9fbb-8d4a-45b8-951a-c8ea585a0afa"
+    try:
+        result = await request_visit.ainvoke({
+            "client_id": "client_test",
+            "property_description": f"Propiedad con ID {uuid_val}",
+            "preferred_datetime": None,
+        })
+        # LangChain convierte el ValidationError en un ToolMessage de error;
+        # si ainvoke no lanza, el resultado debe contener la instrucción.
+        assert "create_or_get_lead" in str(result), (
+            f"Se esperaba instrucción de flujo correcto, se obtuvo: {result!r}"
+        )
+    except Exception as exc:
+        # ValidationError propagada directamente: también válido.
+        assert "create_or_get_lead" in str(exc), (
+            f"Se esperaba instrucción de flujo correcto en el error, se obtuvo: {exc!r}"
+        )

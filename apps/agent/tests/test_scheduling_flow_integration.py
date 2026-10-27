@@ -98,8 +98,8 @@ async def test_full_scheduling_chain_handoff(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_availability_before_lead_is_blocked(monkeypatch):
-    """En modo http, check_agent_availability sin create_or_get_lead previo lanza
-    UnregisteredEntityError ANTES de cualquier llamada HTTP (gate del agency_registry)."""
+    """check_agent_availability sin create_or_get_lead previo retorna BOT_AGENT_NOT_REGISTERED
+    ANTES de cualquier llamada HTTP (guard de tool_langchain sobre is_registered)."""
     monkeypatch.setenv("AGENT_SLOTS_MODE", "http")
     monkeypatch.setenv("BACKEND_URL", "https://fake-backend.test")
     monkeypatch.setenv("BACKEND_SERVICE_TOKEN", "tok-test")
@@ -121,6 +121,6 @@ async def test_availability_before_lead_is_blocked(monkeypatch):
 
     assert result["slots"] == []
     assert result["error"] is not None
-    # El mensaje de UnregisteredEntityError menciona el paso que faltó
     assert "create_or_get_lead" in result["error"]
-    assert not called, "no debió intentar HTTP antes del gate del registry"
+    assert result.get("code") == "BOT_AGENT_NOT_REGISTERED"
+    assert not called, "no debió intentar HTTP antes del guard del registry"

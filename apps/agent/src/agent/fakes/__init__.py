@@ -1,9 +1,65 @@
 """In-memory implementations of all ports."""
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
+from typing import Optional
 import uuid
 from agent.types import Property, AvailableSlot, Appointment, SearchFilters, ClientInteraction
-from agent.ports import CatalogPort, AvailabilityPort, BookingPort, NotificationsPort, ConversationStorePort, AgentSlotsPort, AppointmentBookingPort, ClientResolverPort, LeadPort, ListingAgencyResolverPort
+from agent.ports import CatalogPort, AvailabilityPort, BookingPort, NotificationsPort, ConversationStorePort, AgentSlotsPort, AppointmentBookingPort, ClientResolverPort, LeadPort, ListingAgencyResolverPort, ListingSearchPort
+
+
+# ---------------------------------------------------------------------------
+# Helpers compartidos por FakeListingSearch y HttpListingSearch
+# ---------------------------------------------------------------------------
+
+# Mapa de valores del enum property_type del backend a nombres en español.
+# Valores verificados en homelitics-crm/schema-2.sql:103.
+_TYPE_ES: dict[str, str] = {
+    "APARTMENT": "Apartamento",
+    "HOUSE": "Casa",
+    "STUDIO": "Estudio",
+    "COUNTRY_HOUSE": "Casa campestre",
+}
+
+
+def _type_es(raw: str | None) -> str:
+    """Traduce property_type del backend al español; fallback = valor original."""
+    if not raw:
+        return "Propiedad"
+    return _TYPE_ES.get(raw.upper(), raw)
+
+
+def _normalize(s: str) -> str:
+    """casefold + eliminar tildes para comparación insensible a acentos."""
+    return unicodedata.normalize("NFKD", s.casefold()).encode("ascii", "ignore").decode()
+
+
+def _matches(prop: Property, filters: SearchFilters) -> bool:
+    """True si prop cumple todos los filtros no-None.
+
+    location: substring case/accent insensitivo sobre location del prop.
+    operation_type: igualdad exacta (evita mezclar SALE y RENT en filtros de precio).
+    property_type: igualdad exacta (case-insensitive).
+    price / bedrooms: rango inclusivo.
+    """
+    if filters.location:
+        needle = _normalize(filters.location)
+        haystack = _normalize(prop.location)
+        if needle not in haystack:
+            return False
+    if filters.min_price is not None and prop.price < filters.min_price:
+        return False
+    if filters.max_price is not None and prop.price > filters.max_price:
+        return False
+    if filters.min_bedrooms is not None and prop.bedrooms < filters.min_bedrooms:
+        return False
+    if filters.max_bedrooms is not None and prop.bedrooms > filters.max_bedrooms:
+        return False
+    if filters.property_type and prop.property_type.upper() != filters.property_type.upper():
+        return False
+    if filters.operation_type and prop.operation_type != filters.operation_type:
+        return False
+    return True
 
 class FakeCatalog(CatalogPort):
     def __init__(self):
@@ -93,12 +149,18 @@ class FakeAgentSlots(AgentSlotsPort):
     SLOT_MINUTES = 30
 
     async def list_agent_slots(self, agent_id: str, date_from: str, date_to: str) -> dict:
+        from agent.agent_slots import _to_local
         base = datetime(2026, 9, 10, 9, 0, tzinfo=timezone.utc)
         slots = []
         for offset in range(4):
             start = base + timedelta(hours=offset)
             end = start + timedelta(minutes=self.SLOT_MINUTES)
-            slots.append({"start": start.isoformat(), "end": end.isoformat()})
+            start_iso = start.isoformat()
+            slots.append({
+                "start": start_iso,
+                "end": end.isoformat(),
+                "start_local": _to_local(start_iso),
+            })
         return {
             "agent_id": agent_id,
             "slot_minutes": self.SLOT_MINUTES,
@@ -133,6 +195,11 @@ KNOWN_AGENCY_IDS: frozenset[str] = frozenset({
     "3c835dc0-d944-4fa5-80e9-ab30ed2662e9",  # Ramírez PLC Realty
     "060edf5b-3911-4497-ba43-b2badf0f06cb",  # Sánchez, Hernández and Álvarez Realty
 })
+
+# Agency_id por defecto que el resolver fake retorna cuando el listing_id no
+# está en su mapping explícito. Permite que el modo todo-fake funcione end-to-end
+# sin necesidad de configurar mappings en cada test.
+FAKE_DEFAULT_AGENCY_ID = "8768a84f-a76a-4de6-8e9e-1a11fcbb4e59"  # Cruz-Oviedo Realty
 
 
 class UnknownListingError(KeyError):
@@ -209,18 +276,57 @@ class FakeConversationStore(ConversationStorePort):
 class FakeListingAgencyResolver(ListingAgencyResolverPort):
     """Mapea listing_id → agency_id en memoria.
 
-    Arranca vacío (aún no hay listings reales del backend). Los pares se
-    pasan por el constructor en tests. Los agency_ids válidos viven en
-    KNOWN_AGENCY_IDS.
+    Si el listing_id no está en el mapping explícito, retorna
+    FAKE_DEFAULT_AGENCY_ID en lugar de lanzar — esto permite que el modo
+    todo-fake funcione end-to-end sin configurar mappings. Para simular
+    un listing desconocido en tests usa el stub _ResolverRaises con
+    UnknownListingError.
     """
 
     def __init__(self, mapping: dict[str, str] | None = None):
         self._map: dict[str, str] = dict(mapping or {})
 
     async def resolve(self, listing_id: str) -> str:
-        try:
-            return self._map[listing_id]
-        except KeyError:
-            raise UnknownListingError(
-                f"listing_id {listing_id!r} no está mapeado a ninguna agencia conocida"
-            )
+        return self._map.get(listing_id, FAKE_DEFAULT_AGENCY_ID)
+
+
+class FakeListingSearch(ListingSearchPort):
+    """Catálogo en memoria para dev y tests.
+
+    DEUDA TÉCNICA: IDs sintéticos (prop_001–prop_004) no existen en el backend real.
+    Solo válido con LEAD_MODE=fake — mezclar con LEAD_MODE=http produce UNKNOWN_LISTING
+    (app lo rechaza al arrancar con check_listing_search_modes).
+    """
+
+    _PROPS: list[Property] = [
+        Property(
+            "prop_001", "Apartamento en Laureles", "Laureles",
+            250_000_000, 65, 2, 1, "APARTMENT",
+            [], "Moderno apartamento 2 hab con balcón y parqueadero",
+            "SALE",
+        ),
+        Property(
+            "prop_002", "Casa en Sabaneta", "Sabaneta",
+            350_000_000, 120, 3, 2, "HOUSE",
+            [], "Casa familiar con jardín y garaje",
+            "SALE",
+        ),
+        Property(
+            "prop_003", "Apartamento en Centro", "Centro",
+            1_800_000, 45, 1, 1, "APARTMENT",
+            [], "Apartamento compacto en el centro",
+            "RENT",
+        ),
+        Property(
+            "prop_004", "Casa en Envigado", "Envigado",
+            450_000_000, 180, 4, 3, "HOUSE",
+            [], "Casa de lujo con piscina y jardín",
+            "SALE",
+        ),
+    ]
+
+    async def search(self, filters: SearchFilters, limit: int = 5) -> list[Property]:
+        return [p for p in self._PROPS if _matches(p, filters)][:limit]
+
+    async def get_listing(self, listing_id: str) -> Optional[Property]:
+        return next((p for p in self._PROPS if p.id == listing_id), None)

@@ -9,28 +9,35 @@ from typing import Optional
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 
 from agent.types import AgentReply, ClientInteraction
-from agent.llm import get_langchain_llm
+from shared.llm import get_langchain_llm
 from agent.tools_langchain import get_tools
 from agent.fakes import FakeConversationStore
 from agent.client_resolver import get_client_resolver_provider
-from agent.observability import get_langfuse_callbacks
+from shared.observability import get_langfuse_callbacks
 
 logger = logging.getLogger("agent.steps")
 
 
 def _log_steps(messages: list) -> None:
-    """Imprime cada paso intermedio del ciclo ReAct cuando AGENT_DEBUG=true.
+    """Imprime los pasos intermedios del turno actual del ciclo ReAct cuando AGENT_DEBUG=true.
 
-    Muestra AIMessage con tool_calls (decisión de invocar una herramienta),
-    ToolMessage (resultado devuelto por la herramienta) y AIMessage sin
-    tool_calls que no sea el último mensaje (razonamientos intermedios).
-    El primer HumanMessage y la respuesta final se omiten — ya los ve el caller.
+    Con MemorySaver, ainvoke devuelve el hilo completo acumulado; sólo registramos
+    los mensajes del turno actual (desde el último HumanMessage, excluido, hasta
+    el último AIMessage, excluido) para no re-imprimir los turnos anteriores.
+    Muestra AIMessage con tool_calls, ToolMessage y AIMessages intermedios (sin tool_calls).
     """
     if os.getenv("AGENT_DEBUG", "").lower() not in ("1", "true", "yes"):
         return
 
-    # Saltamos el primer HumanMessage y el último AIMessage (respuesta final).
-    steps = messages[1:-1]
+    # Encontrar el índice del último HumanMessage — inicio del turno actual.
+    last_human_idx = -1
+    for i in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[i], HumanMessage):
+            last_human_idx = i
+            break
+
+    # Pasos del turno actual: desde después del último HumanMessage, sin la respuesta final.
+    steps = messages[last_human_idx + 1 : -1]
     if not steps:
         return
 
